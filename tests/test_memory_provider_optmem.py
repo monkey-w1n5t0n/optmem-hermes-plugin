@@ -9,8 +9,8 @@ import json
 
 import pytest
 
-from plugins.memory.optmem.engine import OptMemEngine
-from plugins.memory.optmem import OptMemProvider
+from optmem.engine import OptMemEngine
+from optmem import OptMemProvider
 
 
 # ---------------------------------------------------------------------------
