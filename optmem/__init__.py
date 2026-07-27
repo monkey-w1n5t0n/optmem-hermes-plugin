@@ -164,8 +164,8 @@ class OptMemProvider(MemoryProvider):
             existing["plugins"]["optmem"] = values
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(existing, f, default_flow_style=False)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("OptMem save_config failed: %s", e)
 
     def initialize(self, session_id: str, **kwargs) -> None:
         from hermes_constants import get_hermes_home

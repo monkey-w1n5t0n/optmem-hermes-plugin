@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optmem-hermes-plugin"
+version = "0.1.0"
+description = "OptMem local memory provider for Hermes Agent — append-only, decay-compressed, BM25 search."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ronald (rarf)" }]
+keywords = ["hermes", "hermes-agent", "memory", "optmem", "agent-memory"]
+dependencies = [
+    "pyyaml",  # already a Hermes dependency; listed for standalone installs
+]
+
+[project.urls]
+Homepage = "https://github.com/rarf/optmem-hermes-plugin"
+Repository = "https://github.com/rarf/optmem-hermes-plugin"
+
+# Hermes discovers standalone memory plugins via directory scan
+# ($HERMES_HOME/plugins/<name>/) and via this entry point group.
+[project.entry-points."hermes.plugins"]
+optmem = "optmem"
+
+[tool.setuptools]
+py-modules = ["optmem"]
