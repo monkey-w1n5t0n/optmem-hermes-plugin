@@ -4,13 +4,22 @@
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](pyproject.toml)
 [![Hermes](https://img.shields.io/badge/Hermes%20Agent-memory%20provider-8A2BE2.svg)](https://github.com/NousResearch/hermes-agent)
 
-A portable, dependency-free reimplementation of
-[Victor Taelin's OptMem](https://github.com/VictorTaelin/OptMem), wired into
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) as a **standalone
-`MemoryProvider`**.
+A portable, dependency-free **independent reimplementation** of
+[Victor Taelin's OptMem](https://github.com/VictorTaelin/OptMem) design, wired
+into [Hermes Agent](https://github.com/NousResearch/hermes-agent) as a
+**standalone `MemoryProvider`**.
 
-- **Append-only `LOG.txt` + decay `TREE/`** — byte-compatible with the original
-  `memo` tool, so your logs are interchangeable with Taelin's implementation.
+> **License note.** The upstream `VictorTaelin/OptMem` repo currently ships
+> **without an explicit license** (all rights reserved by default). This
+> repository is an *independent* reimplementation of the published design and
+> memory format — it does not copy the upstream source. It is released here
+> under MIT (see [LICENSE](LICENSE)). If/once upstream adopts a license, this
+> plugin will align with it.
+
+- **Append-only `LOG.txt` + decay `TREE/`** — uses the **same on-disk format**
+  as the original `memo` tool (fixed-width 320/288-byte records, identical
+  cover/decay math), so logs produced here are byte-compatible and
+  interchangeable with Taelin's implementation.
 - **Accent-normalized BM25 recall** — `recall("cacula")` finds the `caçula` memory.
 - **Zero dependencies** — pure Python standard library.
 - **Native Windows** — uses `msvcrt` advisory locks (with spin/backoff), no WSL.
@@ -101,6 +110,27 @@ Related engine fix (Windows `fcntl` → `msvcrt`):
 
 ---
 
+## How it differs from upstream
+
+The core design — append-only `LOG.txt`, the binary decay `TREE/`, the
+"nap, don't sleep" compression, and the fixed-width record format — is the
+same as Taelin's. The differences are about **where it runs and how you query
+it**, not the memory model:
+
+| Aspect | `VictorTaelin/OptMem` (upstream) | `optmem-hermes-plugin` (this repo) |
+|---|---|---|
+| Form factor | A standalone CLI (`memo`) you paste into `AGENTS.md` | A Hermes `MemoryProvider` — no prompt paste, auto-wired |
+| Query | `memo recall <regex>` (regex only) | `optmem_recall` — **BM25 ranked** (+ optional regex), accent-normalized |
+| Platform locks | `fcntl` only (POSIX/Unix; breaks on Windows) | `msvcrt` on Windows (`LK_NBLCK` + spin/backoff), `fcntl` on Unix |
+| Delivery | CLI output you pipe into context | Surfaced via Hermes `prefetch` every turn; `on_memory_write` mirrors builtin `memory` |
+| Byte format | `LOG_REC=320`, `TREE_REC=288`, `RAW_MAX=16` | **Identical** — logs are interchangeable on disk |
+
+In short: same durable store, but this repo adds **ranked search**, **native
+Windows support**, and **first-class Hermes integration** instead of a prompt
+block.
+
+---
+
 ## Tools
 
 | Tool | Purpose |
@@ -123,6 +153,16 @@ pytest tests/
 `HERMES_HOME` (no mocks of the store): append, accent-normalized BM25,
 nap/decay compression, byte-compat reopen, tool roundtrip, prefetch, and the
 `on_memory_write` mirror.
+
+### Staying aligned with upstream
+
+`./scripts/sync_upstream.sh` fetches Taelin's `memo`, checks that its on-disk
+constants still match this engine's, and re-runs the suite. It does **not**
+auto-merge — it alerts you when upstream drifts so you can adapt deliberately.
+
+```bash
+./scripts/sync_upstream.sh
+```
 
 ---
 
