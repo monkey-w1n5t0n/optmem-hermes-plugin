@@ -213,24 +213,54 @@ class TestOptMemProviderLifecycle:
         assert res["status"] == "imported"
         assert res["count"] == 2
 
-    def test_on_turn_start_auto_naps_with_fake_llm(self, tmp_path):
+    def test_block_lines_returns_raw_lines(self, tmp_path):
         p = _make_provider(tmp_path)
-        p.handle_tool_call("optmem_note", {"text": "memoria A efemera"})
-        p.handle_tool_call("optmem_note", {"text": "memoria B efemera"})
-        # Inject a fake ctx whose .llm returns a valid summary (<280B).
-        class _Ctx:
-            llm = staticmethod(lambda prompt, **kw: "resumo das memorias efemeras")
-        p._ctx = _Ctx()
-        # on_turn_start only fires every 10 turns; simulate turn 10.
-        p.on_turn_start(10, "trigger")
-        # After auto-nap, the block should no longer be pending.
-        pending = p._engine.pending_naps()
-        assert (0, 2) not in pending, "auto-nap should have compressed block 0-2"
+        p.handle_tool_call("optmem_note", {"text": "cliente X aprovou orcamento"})
+        p.handle_tool_call("optmem_note", {"text": "deploy em staging autorizado"})
+        lines = p._engine.block_lines(0, 2)
+        assert lines == ["cliente X aprovou orcamento", "deploy em staging autorizado"]
 
-    def test_on_turn_start_skips_when_no_ctx(self, tmp_path):
+    def test_on_turn_start_local_fallback_naps(self, tmp_path):
         p = _make_provider(tmp_path)
-        p.handle_tool_call("optmem_note", {"text": "a"})
-        p.handle_tool_call("optmem_note", {"text": "b"})
-        # No _ctx set → must be a no-op (no crash, no nap).
+        p.handle_tool_call("optmem_note", {"text": "cliente X aprovou orcamento Q3"})
+        p.handle_tool_call("optmem_note", {"text": "deploy em staging autorizado"})
+        # No LLM, no _ctx → local deterministic summary must run.
         p.on_turn_start(10, "trigger")
+        pending = p._engine.pending_naps()
+        assert (0, 2) not in pending, "local auto-nap should compress block 0-2"
+        # The nap summary is stored in the decay tree.
+        assert "aprov" in p._engine._tree_get(0, 2) or "deploy" in p._engine._tree_get(0, 2)
+
+    def test_on_turn_start_prefers_llm_when_optin(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("OPTMEM_LLM_SUMMARY", "1")
+        p = _make_provider(tmp_path)
+        p.handle_tool_call("optmem_note", {"text": "facto duravel A"})
+        p.handle_tool_call("optmem_note", {"text": "facto duravel B"})
+        captured = {}
+
+        class _Ctx:
+            @staticmethod
+            def llm(prompt, **kw):
+                captured["prompt"] = prompt
+                return "resumo llm de A e B"
+
+        p._ctx = _Ctx()
+        p.on_turn_start(10, "trigger")
+        # Block compressed via LLM summary.
+        assert (0, 2) not in p._engine.pending_naps()
+        assert "resumo llm" in p._engine._tree_get(0, 2)
+        assert "facto duravel" in captured.get("prompt", "")
+
+    def test_on_turn_start_skips_ephemeral_only_block(self, tmp_path):
+        p = _make_provider(tmp_path)
+        # Lines with no durable keyword → local summary returns "" → skip.
+        p.handle_tool_call("optmem_note", {"text": "bla bla irrelevant chat"})
+        p.handle_tool_call("optmem_note", {"text": "mais bla sem sentido"})
+        p.on_turn_start(10, "trigger")
+        # Block stays pending (we refused to lose data).
         assert (0, 2) in p._engine.pending_naps()
+
+    def test_on_turn_start_skips_when_no_engine(self, tmp_path):
+        p = OptMemProvider(config={"memory_dir": str(tmp_path / "x")})
+        # engine is None → must be a no-op (no crash).
+        p.on_turn_start(10, "trigger")

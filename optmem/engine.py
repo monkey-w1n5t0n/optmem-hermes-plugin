@@ -385,6 +385,23 @@ class OptMemEngine:
             f"{body}{tail}\n"
         )
 
+    def block_lines(self, lo: int, hi: int) -> list[str]:
+        """Return the raw memory lines (text only) for block [lo, hi).
+
+        For raw blocks (<= RAW_MAX) this pulls the original LOG.txt lines; for
+        larger blocks it pulls the already-compressed summaries from TREE. Used
+        by the local (LLM-free) auto-nap summarizer.
+        """
+        if hi - lo <= RAW_MAX:
+            return [e[2] for e in self._log_slice(lo, hi)]
+        mid = (lo + hi) // 2
+        out: list[str] = []
+        for a, b in ((lo, mid), (mid, hi)):
+            s = self._tree_get(a, b)
+            if s:
+                out.append(s)
+        return out
+
     def next_nap(self) -> tuple[tuple[int, int], str] | None:
         todo = self.pending_naps(limit=1)
         if not todo:

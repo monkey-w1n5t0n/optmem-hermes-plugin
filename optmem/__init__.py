@@ -60,7 +60,7 @@ except Exception:  # pragma: no cover
         import json
         return json.dumps({"error": message, **extra}, ensure_ascii=False)
 
-from .engine import RAW_MAX, OptMemEngine
+from .engine import ENTRY_CHARS, RAW_MAX, OptMemEngine
 
 logger = logging.getLogger(__name__)
 
@@ -594,43 +594,132 @@ class OptMemProvider(MemoryProvider):
             return tool_error(str(exc))
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
-        """Background decay-tree maintenance: drain pending naps incrementally
-        using the host LLM (ctx.llm), so the tree never falls behind (no manual
-        cron needed). Only runs every ~10 turns to bound LLM cost, and never
-        touches the prompt cache (writes to disk only)."""
-        if self._engine is None or not hasattr(self, "_ctx") or self._ctx is None:
+        """Background decay-tree maintenance: drain pending naps incrementally.
+
+        Default path is a deterministic, LLM-free extractive summary (zero
+        token cost, works in any environment incl. CI/standalone). If LLM
+        summarization is explicitly opted in (OPTMEM_LLM_SUMMARY=1 or config
+        ``llm_summary: true``) and a host LLM is available, it is used for a
+        more fluent summary. Runs every ~10 turns to bound cost. Never touches
+        the prompt cache (writes to disk only) and never crashes the turn.
+        """
+        if self._engine is None:
             return
         if turn_number % 10 != 0:
             return
-        # Use the context's llm to auto-nap the next pending block.
-        # We only run this on the main thread (not cron/subagents).
         try:
             next_nap = self._engine.next_nap()
             if not next_nap:
                 return
-            (lo, hi), prompt = next_nap
-            # Ask the LLM to summarize this block.
-            summary_prompt = (
-                "You are the OptMem auto-nap assistant. "
-                "Summarize the following memories into ONE line (<=280 bytes). "
-                "Keep what has lasting effect, drop what does not. Invent nothing.\n\n"
-                f"{prompt}"
-            )
-            # Use the provider's context LLM if available.
-            llm = (
-                kwargs.get("llm")
-                or getattr(self, "_ctx", None)
-                and getattr(self._ctx, "llm", None)
-            )
-            if not llm:
+            (lo, hi), _prompt = next_nap
+            lines = self._engine.block_lines(lo, hi)
+            if not lines:
                 return
-            resp = llm(summary_prompt, max_tokens=120, temperature=0.1)
-            summary = resp.strip() if isinstance(resp, str) else str(resp).strip()
-            # Validate length
-            if len(summary.encode("utf-8")) > 280:
-                return
-            # Apply the nap
+
+            # Decide summarizer: LLM (opt-in) else local deterministic.
+            llm = None
+            if _use_llm_summary():
+                llm = (
+                    kwargs.get("llm")
+                    or getattr(self, "_ctx", None)
+                    and getattr(self._ctx, "llm", None)
+                )
+
+            if llm:
+                summary_prompt = (
+                    "You are the OptMem auto-nap assistant. "
+                    "Summarize the following memories into ONE line (<=280 bytes). "
+                    "Keep what has lasting effect, drop what does not. Invent nothing.\n\n"
+                    + "\n".join(f"- {ln}" for ln in lines)
+                )
+                resp = llm(summary_prompt, max_tokens=120, temperature=0.1)
+                summary = resp.strip() if isinstance(resp, str) else str(resp).strip()
+                if len(summary.encode("utf-8")) > ENTRY_CHARS:
+                    return
+            else:
+                summary = _local_summary(lines)
+                if not summary:
+                    # Nothing durable in this block — skip rather than lose data.
+                    return
+
             self._engine.apply_nap(lo, hi, summary)
         except Exception:
-            # Never crash the turn on auto-nap failure
+            # Never crash the turn on auto-nap failure.
             pass
+
+
+def _local_summary(lines: list[str]) -> str:
+    """Deterministic, LLM-free extractive summary of memory lines.
+
+    Mirrors the original ``memo`` CLI spirit: no generation, just distillation.
+    Keeps lines/fragments that look like durable facts (dates, names, decisions,
+    approvals, budgets) and drops ephemeral chatter, fitting the result into
+    ENTRY_CHARS bytes. Returns "" if nothing durable is found (caller then
+    skips the nap rather than lose data).
+    """
+    if not lines:
+        return ""
+    # Keywords that signal a durable fact worth keeping.
+    durable = (
+        "aprov", "decid", "orçament", "orcament", "budget", "deploy", "launch",
+        "inici", "start", "complet", "done", "shipped", "client", "contrat",
+        "reun", "meet", "agend", "scheduled", "monitor", "churn", "kpi", "kr ",
+        "objective", "goal", "paywall", "gtm", "growth", "onboard", "staging",
+        "prod", "release", "fix", "bug", "feature", "obra", "casa", "telhad",
+        "casamarcia", "casal",
+    )
+    scored: list[tuple[int, str]] = []
+    for ln in lines:
+        low = ln.lower()
+        score = sum(1 for k in durable if k in low)
+        # Prefer lines that open with a date (YYYY-MM-DD) — those are canonical.
+        if len(ln) >= 10 and ln[0:4].isdigit() and ln[4] == "-":
+            score += 2
+        scored.append((score, ln.strip()))
+
+    # Sort by durability, keep highest-first.
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # If nothing looks durable, refuse to summarize (caller keeps the block raw
+    # rather than lose potentially-relevant ephemeral context).
+    if not any(score > 0 for score, _ in scored):
+        return ""
+
+    # Greedily build the summary within the byte budget.
+    parts: list[str] = []
+    total = 0
+    for score, ln in scored:
+        if score == 0 and parts:
+            # Ephemeral-only line: skip (unless we have nothing else yet).
+            continue
+        b = len(ln.encode("utf-8"))
+        if total + (len(parts) > 0) + b > ENTRY_CHARS:
+            # Try to fit a truncated fragment of this line.
+            if not parts:
+                allowed = ENTRY_CHARS - 1
+                if b > allowed:
+                    ln = ln.encode("utf-8")[:allowed].decode("utf-8", "ignore").rstrip()
+                    if ln:
+                        parts.append(ln)
+            break
+        parts.append(ln)
+        total += b
+        if total >= ENTRY_CHARS - 20:  # leave a small margin
+            break
+    summary = " | ".join(parts)
+    if len(summary.encode("utf-8")) > ENTRY_CHARS:
+        summary = summary.encode("utf-8")[:ENTRY_CHARS].decode("utf-8", "ignore").rstrip()
+    return summary
+
+
+def _use_llm_summary() -> bool:
+    """Opt-in LLM summarization: only when explicitly enabled via config/env.
+
+    Default is the local deterministic summarizer (zero token cost, works
+    everywhere). Set OPTMEM_LLM_SUMMARY=1 or provider config llm_summary: true
+    to let the host LLM write a more fluent summary when available.
+    """
+    import os
+    if os.environ.get("OPTMEM_LLM_SUMMARY") == "1":
+        return True
+    return bool((_load_plugin_config() or {}).get("llm_summary", False))
