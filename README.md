@@ -143,11 +143,30 @@ first-class Hermes integration.**
 - **Decay tree** (`TREE/<size>`). When a pair of memories forms, a *nap* merges
   the block into one line — old context compresses instead of growing.
 - **Search** — regex (default, matches `memo`) or accent-normalized BM25.
+- **Auto-compaction** — `on_turn_start` drains pending naps every ~10 turns
+  with a **deterministic, LLM-free** extractive summary (no gateway, no API,
+  works in CI/standalone). Opt into fluent LLM summaries with
+  `llm_summary: true` or `OPTMEM_LLM_SUMMARY=1`.
 - **Portable lock** — `msvcrt` on Windows (`LK_NBLCK` + spin/backoff), `fcntl`
   on Unix. Descriptors are closed on release (no fd leak).
 
 Related upstream fix (Windows `fcntl` → `msvcrt`):
 [VictorTaelin/OptMem#2](https://github.com/VictorTaelin/OptMem/pull/2).
+
+---
+
+## Examples
+
+A self-contained demo runs the full memory lifecycle **without Hermes**
+(temp store, no network, zero tokens):
+
+```bash
+python examples/standalone_demo.py
+```
+
+It shows: `note` → `recall` (regex + accent-tolerant BM25) → auto-compaction
+(deterministic, LLM-free) → `wake` (decayed context). Equivalent to what the
+agent gets automatically via the `on_turn_start` hook.
 
 ---
 
@@ -158,13 +177,41 @@ pip install pytest
 pytest tests/
 ```
 
-18 end-to-end tests run against the **real** engine and provider (temp
+26 end-to-end tests run against the **real** engine and provider (temp
 `HERMES_HOME`, no mocks): append, regex + BM25 recall, accent normalization,
 nap/decay compression, byte-compat reopen, tool roundtrip, prefetch (wake-once
-per session), `on_memory_write` mirror, and config/import/init.
+per session), `on_memory_write` mirror, `on_turn_start` auto-compaction
+(local + LLM opt-in + ephemeral-skip), and config/import/init.
 
 A bidirectional retro-compatibility harness also proves the plugin and the
 official `memo` CLI read/write the **same store** safely.
+
+### Auto-compaction (no tokens required)
+
+OptMem never grows unbounded: the decay tree compresses old blocks into one
+line each ("nap, don't sleep"). `on_turn_start` runs this automatically every
+~10 turns so context stays dense without you invoking `optmem_nap`.
+
+The summary is produced by a **deterministic, LLM-free** extractor
+(`_local_summary`):
+
+- Scores each line by durability keywords (dates, names, decisions, approvals,
+  budgets, churn, KRs, etc.) and a leading `YYYY-MM-DD` date.
+- Greedily packs the highest-scoring lines into **≤280 bytes** joined by ` | `.
+- Returns `""` when a block has **no** durable signal — the block is then left
+  raw rather than losing potentially-relevant ephemeral context.
+
+This means compaction works **everywhere** — CI, standalone scripts, offline —
+with **zero token cost**. If you want a more fluent summary, opt in:
+
+```yaml
+memory:
+  provider: optmem
+  llm_summary: true   # or export OPTMEM_LLM_SUMMARY=1
+```
+
+When enabled and a host LLM is available, it writes the single summary line;
+otherwise the local extractor is used as a fallback.
 
 ### Staying aligned with upstream
 

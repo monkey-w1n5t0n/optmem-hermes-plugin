@@ -9,6 +9,13 @@ memory:
   provider: optmem
   enabled: true
 
+  # --- Optional OptMem-specific settings ---
+  # Auto-compaction: the plugin compresses old memory blocks every ~10 turns.
+  # Default: deterministic, LLM-free summary (zero token cost, works offline).
+  # Set llm_summary: true to let the host LLM write a more fluent summary
+  # when available (token cost per nap cycle). Equivalent to env OPTMEM_LLM_SUMMARY=1.
+  # llm_summary: true
+
 # Optional: custom store location (default: $HERMES_HOME/memory/optmem)
 # memory_dir: "C:/Users/you/MyOptMemStore"
 
