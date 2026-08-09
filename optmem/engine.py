@@ -454,36 +454,36 @@ class OptMemEngine:
         return self.log_len() != getattr(self, "_index_len", -1)
 
     def recall(self, query: str, topk: int = 5, mode: str = "regex",
-               use_index: bool = True) -> List[Tuple[float, int, str, str]]:
-        """Recall. Default mode "regex" matches the official OptMem `memo recall`
-        behavior exactly: case-insensitive regex over "#id date text", newest
-        matches first, capped by output size. "bm25" is an optional extra
-        (accent-normalized BM25) kept for fuzzy search; it does not change the
-        default behavior so the plugin stays byte- and behavior-compatible with
-        the original CLI on the same store.
-        """
-        if not self.log_len():
-            return []
-        if mode == "bm25":
-            return self._recall_bm25(query, topk, use_index)
-        # mode == "regex" (default) — mirror memo cmd_recall exactly:
-        # case-insensitive regex over "#id date text"; keep the NEWEST matches
-        # that fit within PART_CHARS, returning newest-first.
-        pat = re.compile(query, re.I)
-        PART_CHARS = 5000
-        hits, out, size = 0, [], 0
-        for e in self._all_records():
-            line = "#%d %s %s" % (e[0], e[1], e[2])
-            if not pat.search(line):
-                continue
-            hits += 1
-            out.append((1.0, e[0], e[1], e[2]))
-            size += len(line.encode()) + 1
-            while size > PART_CHARS:
-                old = out.pop(0)
-                size -= len("#%d %s %s" % (old[1], old[2], old[3]).encode()) + 1
-        out.reverse()  # newest-first, matching memo's "Newest N of M" output
-        return out[:topk] if topk else out
+                   use_index: bool = True) -> List[Tuple[float, int, str, str]]:
+            """Recall. Default mode "regex" matches the official OptMem `memo recall`
+            behavior exactly: case-insensitive regex over "#id date text", newest
+            matches first, capped by output size. "bm25" is an optional extra
+            (accent-normalized BM25) kept for fuzzy search; it does not change the
+            default behavior so the plugin stays byte- and behavior-compatible with
+            the original CLI on the same store.
+            """
+            if not self.log_len():
+                return []
+            if mode == "bm25":
+                return self._recall_bm25(query, topk, use_index)
+            # mode == "regex" (default) — mirror memo cmd_recall exactly:
+            # case-insensitive regex over "#id date text"; keep the NEWEST matches
+            # that fit within PART_CHARS, returning newest-first.
+            pat = re.compile(query, re.I)
+            part_chars = self.read_config().get("PART_CHARS", 20000)
+            hits, out, size = 0, [], 0
+            for e in self._all_records():
+                line = "#%d %s %s" % (e[0], e[1], e[2])
+                if not pat.search(line):
+                    continue
+                hits += 1
+                out.append((1.0, e[0], e[1], e[2]))
+                size += len(line.encode()) + 1
+                while size > part_chars:
+                    old = out.pop(0)
+                    size -= len("#%d %s %s" % (old[1], old[2], old[3]).encode()) + 1
+            out.reverse()  # newest-first, matching memo's "Newest N of M" output
+            return out[:topk] if topk else out
 
     def _recall_bm25(self, query: str, topk: int = 5,
                      use_index: bool = True) -> List[Tuple[float, int, str, str]]:
