@@ -23,19 +23,42 @@ per-turn LLM cost. Just memory that survives restarts and stays small.
 
 ---
 
-## Why teams choose OptMem over cloud memory
+## OptMem vs Hermes built-in vs Honcho (cloud)
 
-| | OptMem (local) | Cloud providers (Honcho / Mem0) |
-|---|---|---|
-| Setup | **Zero** — works out of the box | API key + base URL + network |
-| Recall latency | Local search, sub-ms | Network round-trip, often an LLM call |
-| Recall cost | **0 tokens** | Reasoning-tier LLM every call |
-| Data residency | On your disk (`HERMES_HOME`) | Leaves the machine to a 3rd party |
-| Code footprint | ~850 LOC, stdlib only | 1500+ LOC + SDK + background threads |
+Three ways to give Hermes memory. Here is how they compare on the things that
+actually matter in production.
 
-Cloud providers are great for cross-session *user modeling*. OptMem is the
-**durable, always-on default** — your agent's long-term memory that never
-fails because a key expired or a network blipped.
+| Dimension | Hermes built-in (`memory`) | Honcho (cloud) | **OptMem (local)** |
+|---|---|---|---|
+| Setup | Zero — `memory_enabled: true` | API key + base URL + network | **Zero** — `memory.provider: optmem` |
+| Storage | JSONL, one file per session | Cloud DB (vendor-hosted) | Append-only `LOG.txt` + binary decay `TREE/` |
+| Entry size limit | None — paragraphs allowed | None | **≤280 bytes** per atomic fact |
+| Deletion | Edited/deleted freely | Via API (vendor-controlled) | **Never deleted** — forgotten = rebuilt |
+| Growth | Unbounded (log grows forever) | Scales in cloud (costs rise) | **Self-compressing** via decay tree ("nap") |
+| Recall | Recent-first + optional semantic | Semantic + LLM-ranking | Regex (default, = `memo`) or accent BM25 |
+| Recall latency | Local (recent) / embeddings | Network round-trip, often an LLM call | **Local, sub-ms** |
+| Per-call cost | Free recent; embeddings if semantic | **Reasoning-tier LLM every call** | **0 tokens** — local search |
+| Cross-session | Per-session files, needs aggregation | Global user model | **One identity**, whole history searchable |
+| Data residency | On disk in `HERMES_HOME` | **Leaves the machine to a 3rd party** | On disk in `HERMES_HOME` |
+| Offline / private | Yes | No (needs network) | **Yes** |
+| Portability | Hermes-only format | Honcho-only | **Byte-compatible** with `memo` CLI |
+| Code footprint | Core (no extra install) | 1500+ LOC + SDK + threads | ~850 LOC, stdlib only |
+
+**How to choose:**
+
+- **Built-in** — zero setup, free-form notes, semantic search over recent
+  context. Good for short-lived assistants and quick experiments.
+- **Honcho (cloud)** — cross-session *user modeling* and rich semantics, but
+  needs a key, network, and pays an LLM call on recall.
+- **OptMem** — the *durable, always-on default*: a permanent single identity
+  that survives restarts without growing unbounded, costs **zero tokens** to
+  recall, stays on your disk, and is portable to the `memo` CLI. Great for
+  long-running personal agents that need to "remember forever" cheaply.
+
+> OptMem trades *free-form editing* and *cloud user-modeling* for *permanent,
+> compressed, portable, token-free* memory. If you need both, run them side by
+> side: built-in for scratch notes, Honcho for modeling, OptMem for the durable
+> identity.
 
 ---
 
@@ -54,55 +77,6 @@ fails because a key expired or a network blipped.
 - **🪟 Native Windows** — `msvcrt` advisory locks with spin/backoff (no WSL, no
   `Resource deadlock avoided`). `fcntl` on Unix.
 - **🧩 Zero-dependency** — pure Python standard library.
-
----
-
-## OptMem vs Hermes built-in memory
-
-Hermes ships a **built-in memory** (JSONL store under `HERMES_HOME/memory/`,
-enabled with `memory_enabled: true`). It is convenient and zero-config, but it
-is a flat, ever-growing log. OptMem is a *drop-in replacement* for that role
-when you want durability, bounded cost, and a decaying store.
-
-### Side-by-side
-
-| Dimension | Hermes built-in (`memory`) | OptMem (`optmem`) |
-|---|---|---|
-| Storage | JSONL, one file per session | Append-only `LOG.txt` + binary decay `TREE/` |
-| Entry size limit | None — paragraphs allowed | **≤280 bytes** per atomic fact |
-| Deletion | Entries edited/deleted freely | **Never deleted** — forgotten = rebuilt |
-| Growth | Unbounded (log grows forever) | **Self-compressing** via decay tree ("nap") |
-| Recall | Recent-first + optional semantic search | Regex (default, = `memo`) or accent BM25 |
-| Per-call cost | Recent list is free; semantic needs embeddings | **0 tokens** — local search |
-| Cross-session | Per-session files, needs aggregation | **One identity**, whole history searchable |
-| Portability | Hermes-only format | **Byte-compatible** with `memo` CLI |
-| Data residency | On disk in `HERMES_HOME` | On disk in `HERMES_HOME` |
-
-### When to use which
-
-**Use built-in memory when:** you want zero setup, free-form notes, semantic
-search over recent context, and don't mind the log growing or entries being
-edited. Good for short-lived assistants and quick experiments.
-
-**Use OptMem when:** you want a *permanent, single identity* that survives
-restarts without growing unbounded, costs nothing to recall, and stays
-portable to the `memo` CLI. Good for long-running personal agents and anything
-that needs to "remember forever" cheaply.
-
-### Conceptual benchmark (orders of magnitude)
-
-| Scenario | Built-in | OptMem |
-|---|---|---|
-| Recall over 1k memories | recent list O(1); semantic O(k·n) embeddings | regex/BM25 O(n), **sub-ms**, no network |
-| Memory after 1 year | log file grows linearly, no compression | tree decay keeps it dense; old facts summarized |
-| Token cost per turn | 0 for recent; embeddings if semantic on | **0** (local only) |
-| Forgetting a mistake | delete/edit the line | `optmem_forget` drops summary, next `nap` rebuilds |
-
-> OptMem trades *free-form editing* for *permanent, compressed, portable*
-> memory. If you need both, run them side by side: built-in for scratch notes,
-> OptMem for the durable identity.
-
----
 
 ## Quick start
 
