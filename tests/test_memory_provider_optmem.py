@@ -9,9 +9,8 @@ import json
 
 import pytest
 
-from optmem.engine import OptMemEngine
 from optmem import OptMemProvider
-
+from optmem.engine import OptMemEngine
 
 # ---------------------------------------------------------------------------
 # Engine-level behaviour
@@ -69,7 +68,7 @@ class TestOptMemEngine:
     def test_nap_compresses_block(self, tmp_path):
         eng = OptMemEngine(str(tmp_path))
         for i in range(4):
-            eng.append("memoria efemera numero %d" % i)
+            eng.append(f"memoria efemera numero {i}")
         # Blocks of size 2 become due once both halves exist.
         pending = eng.pending_naps()
         assert pending, "expected at least one compressible block"
@@ -83,7 +82,7 @@ class TestOptMemEngine:
     def test_nap_rejects_oversize_summary(self, tmp_path):
         eng = OptMemEngine(str(tmp_path))
         for i in range(2):
-            eng.append("m %d" % i)
+            eng.append(f"m {i}")
         lo, hi = eng.pending_naps()[0]
         with pytest.raises(ValueError):
             eng.apply_nap(lo, hi, "x" * 400)
@@ -125,7 +124,11 @@ class TestOptMemProvider:
 
     def test_note_and_recall_roundtrip(self, tmp_path):
         p = _make_provider(tmp_path)
-        out = json.loads(p.handle_tool_call("optmem_note", {"text": "deploy em staging autorizado"}))
+        out = json.loads(
+            p.handle_tool_call(
+                "optmem_note", {"text": "deploy em staging autorizado"}
+            )
+        )
         assert out["status"] == "added"
         res = json.loads(p.handle_tool_call("optmem_recall", {"query": "staging"}))
         assert res["count"] >= 1
@@ -139,8 +142,9 @@ class TestOptMemProvider:
         nap = p._engine.next_nap()
         assert nap, "expected a pending compression after 2 notes"
         (lo, hi), _ = nap
-        res = json.loads(p.handle_tool_call(
-            "optmem_nap", {"lo": lo, "hi": hi, "summary": "ab resumido"}))
+        res = json.loads(
+            p.handle_tool_call("optmem_nap", {"lo": lo, "hi": hi, "summary": "ab resumido"})
+        )
         assert res["status"] == "compressed"
 
     def test_wake_tool(self, tmp_path):

@@ -19,13 +19,13 @@ offset — no index file to keep in sync.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import os
 import re
 import sys
 import unicodedata
-from collections import defaultdict, deque
-from typing import List, Optional, Tuple
+from collections import defaultdict
 
 # Fixed-width records, identical to the original memo tool so the two are
 # byte-compatible on disk.
@@ -49,12 +49,13 @@ def _make_lock(path: str):
 
     Uses msvcrt on Windows, fcntl on Unix. No-op if neither is importable.
     """
-    lockf = open(os.path.join(os.path.dirname(path) or ".", ".lock"), "a")
+    lockf = open(os.path.join(os.path.dirname(path) or ".", ".lock"), "a")  # noqa: SIM115
     if sys.platform == "win32":
         try:
             import msvcrt
         except Exception:
             return _NullLock(lockf)
+
         def _acquire():
             # LK_NBLCK never blocks; spin with backoff so parallel processes
             # (Taelin's target: many concurrent sessions) queue instead of
@@ -70,23 +71,25 @@ def _make_lock(path: str):
                         raise
                     _t.sleep(min(0.01 + waited * 0.2, 0.25))
                     waited += 0.01
+
         def _release():
-            try:
+            with contextlib.suppress(Exception):
                 msvcrt.locking(lockf.fileno(), msvcrt.LK_UNLCK, 1)
-            except Exception:
-                pass
+
         return _Flock(lockf, _acquire, _release)
+
     try:
         import fcntl
     except Exception:
         return _NullLock(lockf)
+
     def _acquire():
         fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+
     def _release():
-        try:
+        with contextlib.suppress(Exception):
             fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
+
     return _Flock(lockf, _acquire, _release)
 
 
@@ -95,30 +98,30 @@ class _Flock:
         self._f = f
         self._acquire = acquire
         self._release = release
+
     def __enter__(self):
         self._acquire()
         return self
+
     def __exit__(self, *exc):
         try:
             self._release()
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 self._f.close()
-            except Exception:
-                pass
         return False
 
 
 class _NullLock:
     def __init__(self, f):
         self._f = f
+
     def __enter__(self):
         return self
+
     def __exit__(self, *exc):
-        try:
+        with contextlib.suppress(Exception):
             self._f.close()
-        except Exception:
-            pass
         return False
 
 
@@ -133,18 +136,18 @@ def _normalize(s: str) -> str:
     return s.lower()
 
 
-def _tokenize(s: str) -> List[str]:
+def _tokenize(s: str) -> list[str]:
     return [t for t in re.split(r"[^a-z0-9]+", _normalize(s)) if t]
 
 
 def _pad(text: str, rec: int) -> bytes:
     b = text.encode("utf-8")
     if len(b) > rec - 1:
-        raise ValueError("entry too long: %d bytes, limit %d" % (len(b), rec - 1))
+        raise ValueError(f"entry too long: {len(b)} bytes, limit {rec - 1}")
     return b + b" " * (rec - 1 - len(b)) + b"\n"
 
 
-def _parse(line: str) -> Tuple[int, str, str]:
+def _parse(line: str) -> tuple[int, str, str]:
     head, _, rest = line.partition(" ")
     date, _, text = rest.partition(" ")
     return int(head[1:]), date, text
@@ -154,13 +157,13 @@ def _parse(line: str) -> Tuple[int, str, str]:
 # Cover / decay tree (identical math to memo)
 # ---------------------------------------------------------------------------
 
-def _cover(T: int, alpha: float) -> List[Tuple[int, int]]:
+def _cover(T: int, alpha: float) -> list[tuple[int, int]]:
     """Tile [0,T) with aligned power-of-two blocks; keep a block whole iff its
     size is at most ``alpha`` times its age. Bigger alpha = coarser."""
     root = 1
     while root < T:
         root *= 2
-    out: List[Tuple[int, int]] = []
+    out: list[tuple[int, int]] = []
     stack = [(0, root)]
     while stack:
         lo, hi = stack.pop()
@@ -177,7 +180,7 @@ def _cover(T: int, alpha: float) -> List[Tuple[int, int]]:
     return out
 
 
-def cover(T: int, budget: int) -> List[Tuple[int, int]]:
+def cover(T: int, budget: int) -> list[tuple[int, int]]:
     """The blocks ``wake`` prints: at most ``budget`` of them, finest near T.
 
     Detail decays with age: recent memories stay verbatim, ancient ones
@@ -185,7 +188,7 @@ def cover(T: int, budget: int) -> List[Tuple[int, int]]:
     """
     if T <= 0:
         return []
-    if T <= budget:
+    if budget >= T:
         return [(i, i + 1) for i in range(T)]
     lo, hi = 0.0, 1.0
     for _ in range(60):
@@ -242,7 +245,7 @@ class OptMemEngine:
             with open(path, "r+b") as f:
                 f.truncate(n - n % rec)
 
-    def _log_slice(self, lo: int, hi: int) -> List[Tuple[int, str, str]]:
+    def _log_slice(self, lo: int, hi: int) -> list[tuple[int, str, str]]:
         with open(self.log_path, "rb") as f:
             f.seek(lo * LOG_REC)
             buf = f.read((hi - lo) * LOG_REC)
@@ -261,7 +264,7 @@ class OptMemEngine:
     def _tree_path(self, size: int) -> str:
         return os.path.join(self.dir, "TREE", str(size))
 
-    def _tree_get(self, lo: int, hi: int) -> Optional[str]:
+    def _tree_get(self, lo: int, hi: int) -> str | None:
         size = hi - lo
         p = self._tree_path(size)
         try:
@@ -290,7 +293,7 @@ class OptMemEngine:
 
     # -- public writes ------------------------------------------------------
 
-    def append(self, text: str, date: Optional[str] = None) -> int:
+    def append(self, text: str, date: str | None = None) -> int:
         """Append one memory line. Returns its id."""
         text = text.strip()
         if not text:
@@ -299,54 +302,54 @@ class OptMemEngine:
             raise ValueError("a memory is one line")
         b = text.encode("utf-8")
         if len(b) > ENTRY_CHARS:
-            raise ValueError("too long: %d bytes, limit %d" % (len(b), ENTRY_CHARS))
+            raise ValueError(f"too long: {len(b)} bytes, limit {ENTRY_CHARS}")
         if date is None:
             date = datetime.date.today().isoformat()
         with self._lock():
             self._repair(self.log_path, LOG_REC)
             base = self.log_len()
             with open(self.log_path, "ab") as f:
-                f.write(_pad("#%d %s %s" % (base, date, text), LOG_REC))
+                f.write(_pad(f"#{base} {date} {text}", LOG_REC))
                 f.flush()
                 os.fsync(f.fileno())
         return base
 
-    def import_lines(self, lines: List[Tuple[str, str]]) -> int:
-        """Bulk append (date, text) pairs. Returns first id."""
-        with self._lock():
-            self._repair(self.log_path, LOG_REC)
-            base = self.log_len()
-            with open(self.log_path, "ab") as f:
-                for k, (date, text) in enumerate(lines):
-                    f.write(_pad("#%d %s %s" % (base + k, date, text), LOG_REC))
-                f.flush()
-                os.fsync(f.fileno())
-        return base
+    def import_lines_pairs(self, lines: list[tuple[str, str]]) -> int:
+            """Bulk append (date, text) pairs. Returns first id."""
+            with self._lock():
+                self._repair(self.log_path, LOG_REC)
+                base = self.log_len()
+                with open(self.log_path, "ab") as f:
+                    for k, (date, text) in enumerate(lines):
+                        f.write(_pad(f"#{base + k} {date} {text}", LOG_REC))
+                    f.flush()
+                    os.fsync(f.fileno())
+            return base
 
     # -- reads --------------------------------------------------------------
 
-    def wake_lines(self, budget: int = WAKE_LINES) -> List[str]:
+    def wake_lines(self, budget: int = WAKE_LINES) -> list[str]:
         """Return the memory context (recent verbatim, old collapsed)."""
         T = self.log_len()
         if T == 0:
             return []
-        out: List[str] = []
+        out: list[str] = []
         for lo, hi in cover(T, budget):
             if hi - lo == 1:
                 mid, date, text = self._log_slice(lo, hi)[0]
-                out.append("#%d %s %s" % (mid, date, text))
+                out.append(f"#{mid} {date} {text}")
             else:
                 s = self._tree_get(lo, hi)
                 if s is None:
-                    out.append("#%d-%d (needs compression: run optmem_nap)" % (lo, hi - 1))
+                    out.append(f"#{lo}-{hi - 1} (needs compression: run optmem_nap)")
                 else:
-                    out.append("#%d-%d %s" % (lo, hi - 1, s))
+                    out.append(f"#{lo}-{hi - 1} {s}")
         return out
 
     # -- naps (compression) -------------------------------------------------
 
-    def _pending(self, T: int, limit: Optional[int] = None) -> List[Tuple[int, int]]:
-        todo: List[Tuple[int, int]] = []
+    def _pending(self, T: int, limit: int | None = None) -> list[tuple[int, int]]:
+        todo: list[tuple[int, int]] = []
         size = 2
         while size <= T:
             have = self._count(self._tree_path(size), TREE_REC)
@@ -357,14 +360,14 @@ class OptMemEngine:
             size *= 2
         return todo
 
-    def pending_naps(self, limit: Optional[int] = None) -> List[Tuple[int, int]]:
+    def pending_naps(self, limit: int | None = None) -> list[tuple[int, int]]:
         """Blocks that can be built and have not been, smallest first."""
         return self._pending(self.log_len(), limit)
 
     def nap_prompt(self, lo: int, hi: int) -> str:
         """Build the compression instruction for block [lo,hi)."""
         if hi - lo <= RAW_MAX:
-            body = "\n".join("  #%d %s %s" % e for e in self._log_slice(lo, hi))
+            body = "\n".join(f"  #{e[0]} {e[1]} {e[2]}" for e in self._log_slice(lo, hi))
         else:
             mid = (lo + hi) // 2
             halves = []
@@ -372,19 +375,17 @@ class OptMemEngine:
                 s = self._tree_get(a, b)
                 if s is None:
                     s = "(missing — rebuild)"
-                halves.append("  #%d-%d %s" % (a, b - 1, s))
+                halves.append(f"  #{a}-{b - 1} {s}")
             body = "\n".join(halves)
         left = len(self.pending_naps()) - 1
-        tail = "" if left <= 0 else (
-            "\n%d compressions remain" % left)
+        tail = "" if left <= 0 else f"\n{left} compressions remain"
         return (
-            "Compress memories #%d-%d into one line of at most %d bytes.\n"
+            f"Compress memories #{lo}-{hi - 1} into one line of at most {ENTRY_CHARS} bytes.\n"
             "Keep what has lasting effect, drop what does not. Invent nothing.\n\n"
-            "%s%s\n"
-            % (lo, hi - 1, ENTRY_CHARS, body, tail)
+            f"{body}{tail}\n"
         )
 
-    def next_nap(self) -> Optional[Tuple[Tuple[int, int], str]]:
+    def next_nap(self) -> tuple[tuple[int, int], str] | None:
         todo = self.pending_naps(limit=1)
         if not todo:
             return None
@@ -397,7 +398,7 @@ class OptMemEngine:
         if not summary:
             raise ValueError("empty summary")
         if len(summary.encode("utf-8")) > ENTRY_CHARS:
-            raise ValueError("summary too long: max %d bytes" % ENTRY_CHARS)
+            raise ValueError(f"summary too long: max {ENTRY_CHARS} bytes")
         return self._tree_put(lo, hi, summary)
 
     def forget(self, lo: int, hi: int) -> None:
@@ -415,7 +416,7 @@ class OptMemEngine:
 
     # -- search (BM25 + regex) ----------------------------------------------
 
-    def _all_records(self) -> List[Tuple[int, str, str, List[str]]]:
+    def _all_records(self) -> list[tuple[int, str, str, list[str]]]:
         T = self.log_len()
         docs = []
         for i in range(T):
@@ -454,39 +455,39 @@ class OptMemEngine:
         return self.log_len() != getattr(self, "_index_len", -1)
 
     def recall(self, query: str, topk: int = 5, mode: str = "regex",
-                   use_index: bool = True) -> List[Tuple[float, int, str, str]]:
-            """Recall. Default mode "regex" matches the official OptMem `memo recall`
-            behavior exactly: case-insensitive regex over "#id date text", newest
-            matches first, capped by output size. "bm25" is an optional extra
-            (accent-normalized BM25) kept for fuzzy search; it does not change the
-            default behavior so the plugin stays byte- and behavior-compatible with
-            the original CLI on the same store.
-            """
-            if not self.log_len():
-                return []
-            if mode == "bm25":
-                return self._recall_bm25(query, topk, use_index)
-            # mode == "regex" (default) — mirror memo cmd_recall exactly:
-            # case-insensitive regex over "#id date text"; keep the NEWEST matches
-            # that fit within PART_CHARS, returning newest-first.
-            pat = re.compile(query, re.I)
-            part_chars = self.read_config().get("PART_CHARS", 20000)
-            hits, out, size = 0, [], 0
-            for e in self._all_records():
-                line = "#%d %s %s" % (e[0], e[1], e[2])
-                if not pat.search(line):
-                    continue
-                hits += 1
-                out.append((1.0, e[0], e[1], e[2]))
-                size += len(line.encode()) + 1
-                while size > part_chars:
-                    old = out.pop(0)
-                    size -= len("#%d %s %s" % (old[1], old[2], old[3]).encode()) + 1
-            out.reverse()  # newest-first, matching memo's "Newest N of M" output
-            return out[:topk] if topk else out
+               use_index: bool = True) -> list[tuple[float, int, str, str]]:
+        """Recall. Default mode "regex" matches the official OptMem `memo recall`
+        behavior exactly: case-insensitive regex over "#id date text", newest
+        matches first, capped by output size. "bm25" is an optional extra
+        (accent-normalized BM25) kept for fuzzy search; it does not change the
+        default behavior so the plugin stays byte- and behavior-compatible with
+        the original CLI on the same store.
+        """
+        if not self.log_len():
+            return []
+        if mode == "bm25":
+            return self._recall_bm25(query, topk, use_index)
+        # mode == "regex" (default) — mirror memo cmd_recall exactly:
+        # case-insensitive regex over "#id date text"; keep the NEWEST matches
+        # that fit within PART_CHARS, returning newest-first.
+        pat = re.compile(query, re.I)
+        part_chars = self.read_config().get("PART_CHARS", 20000)
+        hits, out, size = 0, [], 0
+        for e in self._all_records():
+            line = f"#{e[0]} {e[1]} {e[2]}"
+            if not pat.search(line):
+                continue
+            hits += 1
+            out.append((1.0, e[0], e[1], e[2]))
+            size += len(line.encode()) + 1
+            while size > part_chars:
+                old = out.pop(0)
+                size -= len(f"#{old[1]} {old[2]} {old[3]}".encode()) + 1
+        out.reverse()  # newest-first, matching memo's "Newest N of M" output
+        return out[:topk] if topk else out
 
     def _recall_bm25(self, query: str, topk: int = 5,
-                     use_index: bool = True) -> List[Tuple[float, int, str, str]]:
+                     use_index: bool = True) -> list[tuple[float, int, str, str]]:
         """Accent-normalized BM25 (optional, non-default)."""
         if use_index and self._index_stale():
             self.build_index()
@@ -534,31 +535,33 @@ class OptMemEngine:
         "PART_LINES": (500, "output paging: largest part, in lines"),
     }
 
-    def read_config(self) -> Dict[str, int]:
+    def read_config(self) -> dict[str, int]:
         """Read the per-store `config` file (mirrors memo's `config`)."""
         path = os.path.join(self.dir, "config")
         over = {}
         if os.path.exists(path):
-            for line in open(path, encoding="utf-8"):
-                line = line.split("#", 1)[0].strip()
-                if not line:
-                    continue
-                k, eq, v = line.partition("=")
-                if eq and k.strip() in self.KNOBS:
-                    try:
-                        over[k.strip()] = int(v.strip())
-                    except ValueError:
-                        pass
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.split("#", 1)[0].strip()
+                    if not line:
+                        continue
+                    k, eq, v = line.partition("=")
+                    if eq and k.strip() in self.KNOBS:
+                        with contextlib.suppress(ValueError):
+                            over[k.strip()] = int(v.strip())
         return over
 
-    def write_config(self, over: Dict[str, int]) -> None:
+    def write_config(self, over: dict[str, int]) -> None:
         """Write the per-store `config` file (mirrors memo's write_config)."""
         path = os.path.join(self.dir, "config")
-        out = ["# OptMem sizes for this memory. A commented line means: follow the",
-               "# tool's default. Edit with `optmem_config NAME=VALUE`.", ""]
+        out = [
+            "# OptMem sizes for this memory. A commented line means: follow the",
+            "# tool's default. Edit with `optmem_config NAME=VALUE`.",
+            "",
+        ]
         for k, (default, what) in self.KNOBS.items():
-            out.append("%-2s%-12s = %-6d # %s"
-                       % ("" if k in over else "# ", k, over.get(k, default), what))
+            prefix = "" if k in over else "# "
+            out.append(f"{prefix}{k:<12} = {over.get(k, default):<6} # {what}")
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write("\n".join(out) + "\n")
@@ -575,10 +578,10 @@ class OptMemEngine:
             self.write_config({})
         return fresh
 
-    def import_lines(self, lines: List[str]) -> int:
+    def import_lines(self, lines: list[str]) -> int:
         """Bulk-append historical 'YYYY-MM-DD <text>' memories (mirrors memo import).
-        Used once for bootstrapping an identity. Returns count appended."""
-        import datetime
+        Used once for bootstrapping an identity. Returns count appended.
+        """
         recs = self._all_records()
         last = recs[-1][1] if recs else "0000-00-00"
         parsed = []  # validate everything first, then write (atomic-ish)
@@ -588,16 +591,19 @@ class OptMemEngine:
                 continue
             date, _, text = line.partition(" ")
             if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
-                raise ValueError("line %d: expected 'YYYY-MM-DD <text>', got: %s" % (i, line))
+                raise ValueError(f"line {i}: expected 'YYYY-MM-DD <text>', got: {line}")
             try:
                 datetime.datetime.strptime(date, "%Y-%m-%d")
-            except ValueError:
-                raise ValueError("line %d: %s is not a real date." % (i, date))
+            except ValueError as err:
+                raise ValueError(f"line {i}: {date} is not a real date.") from err
             if date < last:
-                raise ValueError("line %d: date %s precedes previous (%s)." % (i, date, last))
+                raise ValueError(f"line {i}: date {date} precedes previous ({last}).")
             text = text.strip()
-            if not text or len(text.encode("utf-8")) > ENTRY_CHARS:
-                raise ValueError("line %d: %d bytes, limit %d." % (i, len(text.encode("utf-8")), ENTRY_CHARS))
+            if not text:
+                raise ValueError(f"line {i}: empty text")
+            byte_len = len(text.encode("utf-8"))
+            if byte_len > ENTRY_CHARS:
+                raise ValueError(f"line {i}: {byte_len} bytes, limit {ENTRY_CHARS}.")
             parsed.append((date, text))
             last = date
         for date, text in parsed:
@@ -608,9 +614,9 @@ class OptMemEngine:
         """Append a memory with an explicit date (used by import)."""
         with self._lock():
             mid = self.log_len()
-            rec = ("#%d %s %s" % (mid, date, text)).encode("utf-8")
+            rec = f"#{mid} {date} {text}".encode()
             if len(rec) > LOG_REC - 1:
-                raise ValueError("entry too long: %d bytes" % len(rec))
+                raise ValueError(f"entry too long: {len(rec)} bytes")
             with open(os.path.join(self.dir, "LOG.txt"), "r+b") as f:
                 f.seek(mid * LOG_REC)
                 f.write(rec)

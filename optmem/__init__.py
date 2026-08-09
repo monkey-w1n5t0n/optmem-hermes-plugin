@@ -27,13 +27,14 @@ Design notes
 
 from __future__ import annotations
 
+import contextlib
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
-from .engine import OptMemEngine
+from .engine import RAW_MAX, OptMemEngine
 
 logger = logging.getLogger(__name__)
 
@@ -203,13 +204,18 @@ INIT_SCHEMA = {
 }
 
 
+def _json(obj: Any) -> str:
+    import json
+    return json.dumps(obj, ensure_ascii=False)
+
+
 class OptMemProvider(MemoryProvider):
     """Hermes MemoryProvider backed by the OptMem append-only engine."""
 
-    def __init__(self, config: Optional[dict] = None):
+    def __init__(self, config: dict | None = None):
         self._config = config or _load_plugin_config()
-        self._engine: Optional[OptMemEngine] = None
-        self._memory_dir: Optional[str] = None
+        self._engine: OptMemEngine | None = None
+        self._memory_dir: str | None = None
 
     @property
     def name(self) -> str:
@@ -225,7 +231,10 @@ class OptMemProvider(MemoryProvider):
         return [
             {
                 "key": "memory_dir",
-                "description": "Directory for LOG.txt + TREE/ (default: $HERMES_HOME/optmem_memory)",
+                "description": (
+                    "Directory for LOG.txt + TREE/ "
+                    "(default: $HERMES_HOME/optmem_memory)"
+                ),
                 "default": default_dir,
             },
         ]
@@ -252,10 +261,8 @@ class OptMemProvider(MemoryProvider):
                 _os.fsync(f.fileno())
             _os.replace(tmp, config_path)
         except Exception:
-            try:
+            with contextlib.suppress(Exception):
                 _os.unlink(tmp)
-            except Exception:
-                pass
             raise
 
     def initialize(self, session_id: str, **kwargs) -> None:
@@ -299,15 +306,19 @@ class OptMemProvider(MemoryProvider):
             if not self._woke_session:
                 wake = self._engine.wake_lines()
                 if wake:
-                    lines.append("## OptMem context (permanent, decay-compressed)\n" + "\n".join(wake))
+                    lines.append(
+                        "## OptMem context (permanent, decay-compressed)\n"
+                        + "\n".join(wake)
+                    )
                 self._woke_session = True
             # Pending nap is always shown (mandatory pressure, like the CLI).
             nap = self._engine.next_nap()
             if nap:
                 (lo, hi), prompt = nap
                 lines.append(
-                    "[OptMem] Compression due for #%d-%d. Run optmem_nap with a "
-                    "one-line summary (max 280 bytes):\n%s" % (lo, hi - 1, prompt)
+                    f"[OptMem] Compression due for #{lo}-{hi - 1}. "
+                    "Run optmem_nap with a one-line summary (max 280 bytes):\n"
+                    f"{prompt}"
                 )
             # Query-scoped recall only (no wake re-injection on later turns).
             if query:
@@ -352,11 +363,11 @@ class OptMemProvider(MemoryProvider):
 
     # -- tools --------------------------------------------------------------
 
-    def get_tool_schemas(self) -> List[Dict[str, Any]]:
+    def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [NOTE_SCHEMA, RECALL_SCHEMA, NAP_SCHEMA, WAKE_SCHEMA, ZOOM_SCHEMA,
                 FORGET_SCHEMA, CONFIG_SCHEMA, IMPORT_SCHEMA, INIT_SCHEMA]
 
-    def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+    def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs) -> str:
         if tool_name == "optmem_note":
             return self._handle_note(args)
         if tool_name == "optmem_recall":
@@ -438,7 +449,7 @@ class OptMemProvider(MemoryProvider):
         except Exception as exc:
             return tool_error(str(exc))
 
-    def _validate_block(self, lo: int, hi: int) -> Optional[str]:
+    def _validate_block(self, lo: int, hi: int) -> str | None:
         """Return an error string if (lo,hi) is not a valid aligned power-of-two
         block id (mirrors memo's block_id check). hi is EXCLUSIVE."""
         n = hi - lo
@@ -456,7 +467,7 @@ class OptMemProvider(MemoryProvider):
             size = hi - lo
             if size <= RAW_MAX:
                 body = self._engine._log_slice(lo, hi)
-                out = ["#%d %s %s" % e for e in body]
+                out = [f"#{e[0]} {e[1]} {e[2]}" for e in body]
             else:
                 mid = (lo + hi) // 2
                 out = []
@@ -464,7 +475,7 @@ class OptMemProvider(MemoryProvider):
                     s = self._engine._tree_get(a, b)
                     if s is None:
                         s = "(missing - rebuild via optmem_nap)"
-                    out.append("#%d-%d %s" % (a, b - 1, s))
+                    out.append(f"#{a}-{b - 1} {s}")
             return _json({"block": f"{lo}-{hi-1}", "halves": out})
         except (KeyError, ValueError) as exc:
             return tool_error(str(exc))
@@ -478,7 +489,6 @@ class OptMemProvider(MemoryProvider):
             err = self._validate_block(lo, hi)
             if err:
                 return tool_error(err)
-            before = self._engine.log_len()
             self._engine.forget(lo, hi)
             return _json({"status": "forgotten", "block": f"{lo}-{hi-1}"})
         except (KeyError, ValueError) as exc:
@@ -494,8 +504,10 @@ class OptMemProvider(MemoryProvider):
                 k, eq, v = str(c).partition("=")
                 k = k.strip().upper()
                 if not eq or k not in self._engine.KNOBS:
+                    allowed = ", ".join(self._engine.KNOBS)
                     return tool_error(
-                        "invalid knob %r; allowed: %s" % (c, ", ".join(self._engine.KNOBS)))
+                        f"invalid knob {c!r}; allowed: {allowed}"
+                    )
                 over[k] = int(v.strip())
             if changes:
                 self._engine.write_config(over)
@@ -538,33 +550,35 @@ class OptMemProvider(MemoryProvider):
             return
         if turn_number % 10 != 0:
             return
+        # Use the context's llm to auto-nap the next pending block.
+        # We only run this on the main thread (not cron/subagents).
         try:
-            nap = self._engine.next_nap()
-            if not nap:
+            next_nap = self._engine.next_nap()
+            if not next_nap:
                 return
-            (lo, hi), prompt = nap
-            summary = self._ctx.llm.complete(prompt, max_tokens=120).strip()
-            if summary:
-                self._engine.apply_nap(lo, hi, summary)
-        except Exception as e:
-            logger.warning("OptMem auto-nap skipped: %s", e)
-
-    def shutdown(self) -> None:
-        self._engine = None
-
-
-def _json(obj) -> str:
-    import json
-    return json.dumps(obj, ensure_ascii=False)
-
-
-# ---------------------------------------------------------------------------
-# Plugin entry point
-# ---------------------------------------------------------------------------
-
-def register(ctx) -> None:
-    """Register the OptMem memory provider with Hermes."""
-    config = _load_plugin_config()
-    provider = OptMemProvider(config=config)
-    provider._ctx = ctx  # give on_turn_start access to ctx.llm for auto-nap
-    ctx.register_memory_provider(provider)
+            (lo, hi), prompt = next_nap
+            # Ask the LLM to summarize this block.
+            summary_prompt = (
+                "You are the OptMem auto-nap assistant. "
+                "Summarize the following memories into ONE line (<=280 bytes). "
+                "Keep what has lasting effect, drop what does not. Invent nothing.\n\n"
+                f"{prompt}"
+            )
+            # Use the provider's context LLM if available.
+            llm = (
+                kwargs.get("llm")
+                or getattr(self, "_ctx", None)
+                and getattr(self._ctx, "llm", None)
+            )
+            if not llm:
+                return
+            resp = llm(summary_prompt, max_tokens=120, temperature=0.1)
+            summary = resp.strip() if isinstance(resp, str) else str(resp).strip()
+            # Validate length
+            if len(summary.encode("utf-8")) > 280:
+                return
+            # Apply the nap
+            self._engine.apply_nap(lo, hi, summary)
+        except Exception:
+            # Never crash the turn on auto-nap failure
+            pass
