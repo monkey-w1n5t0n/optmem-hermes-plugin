@@ -178,3 +178,59 @@ class TestOptMemProvider:
         reopened = OptMemEngine(str(tmp_path / "optmem_memory"))
         assert reopened.log_len() == 1
         assert "persiste" in reopened.wake_lines()[0]
+
+
+class TestOptMemProviderLifecycle:
+    def test_save_config_writes_yaml_atomic(self, tmp_path):
+        from pathlib import Path
+        p = _make_provider(tmp_path)
+        p.save_config({"memory_dir": "/tmp/x"}, str(tmp_path))
+        cfg = Path(tmp_path / "config.yaml")
+        assert cfg.exists()
+        import yaml
+        data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+        assert data["plugins"]["optmem"] == {"memory_dir": "/tmp/x"}
+
+    def test_init_store_is_idempotent(self, tmp_path):
+        # Fresh provider (not yet initialized) → first init reports fresh=True.
+        mem_dir = tmp_path / "optmem_memory"
+        p = OptMemProvider(config={"memory_dir": str(mem_dir)})
+        fresh1 = p.handle_tool_call("optmem_init", {})
+        assert json.loads(fresh1)["fresh"] is True
+        # Second init on the same dir → fresh=False (never overwrites data).
+        p2 = OptMemProvider(config={"memory_dir": str(mem_dir)})
+        fresh2 = p2.handle_tool_call("optmem_init", {})
+        assert json.loads(fresh2)["fresh"] is False
+
+    def test_import_lines_from_file(self, tmp_path):
+        p = _make_provider(tmp_path)
+        import_file = tmp_path / "bootstrap.txt"
+        import_file.write_text(
+            "2026-01-01 facto A duravel\n2026-02-01 facto B duravel\n",
+            encoding="utf-8",
+        )
+        res = json.loads(p.handle_tool_call("optmem_import", {"file": str(import_file)}))
+        assert res["status"] == "imported"
+        assert res["count"] == 2
+
+    def test_on_turn_start_auto_naps_with_fake_llm(self, tmp_path):
+        p = _make_provider(tmp_path)
+        p.handle_tool_call("optmem_note", {"text": "memoria A efemera"})
+        p.handle_tool_call("optmem_note", {"text": "memoria B efemera"})
+        # Inject a fake ctx whose .llm returns a valid summary (<280B).
+        class _Ctx:
+            llm = staticmethod(lambda prompt, **kw: "resumo das memorias efemeras")
+        p._ctx = _Ctx()
+        # on_turn_start only fires every 10 turns; simulate turn 10.
+        p.on_turn_start(10, "trigger")
+        # After auto-nap, the block should no longer be pending.
+        pending = p._engine.pending_naps()
+        assert (0, 2) not in pending, "auto-nap should have compressed block 0-2"
+
+    def test_on_turn_start_skips_when_no_ctx(self, tmp_path):
+        p = _make_provider(tmp_path)
+        p.handle_tool_call("optmem_note", {"text": "a"})
+        p.handle_tool_call("optmem_note", {"text": "b"})
+        # No _ctx set → must be a no-op (no crash, no nap).
+        p.on_turn_start(10, "trigger")
+        assert (0, 2) in p._engine.pending_naps()

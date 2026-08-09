@@ -31,8 +31,34 @@ import contextlib
 import logging
 from typing import Any
 
-from agent.memory_provider import MemoryProvider
-from tools.registry import tool_error
+# Hermes-only dependencies. The plugin must import cleanly in a bare CI
+# environment (no gateway on sys.path) so `import optmem` works for tests and
+# the provider's own unit suite. We fall back to a builtin base + local
+# tool_error when Hermes is absent.
+try:
+    from agent.memory_provider import MemoryProvider
+except Exception:  # pragma: no cover - exercised only outside the gateway
+    class MemoryProvider:  # type: ignore[no-redef]
+        """Minimal stand-in so the module imports without the Hermes core."""
+
+        def name(self) -> str:
+            raise NotImplementedError
+
+        def is_available(self) -> bool:
+            raise NotImplementedError
+
+        def initialize(self, session_id: str, **kwargs) -> None:
+            raise NotImplementedError
+
+        def get_tool_schemas(self):
+            raise NotImplementedError
+
+try:
+    from tools.registry import tool_error
+except Exception:  # pragma: no cover
+    def tool_error(message: str, **extra: Any) -> str:
+        import json
+        return json.dumps({"error": message, **extra}, ensure_ascii=False)
 
 from .engine import RAW_MAX, OptMemEngine
 
@@ -40,13 +66,30 @@ logger = logging.getLogger(__name__)
 
 
 def _load_plugin_config() -> dict:
-    from hermes_cli.config import cfg_get
     try:
-        from hermes_cli.config import load_config
+        from hermes_cli.config import cfg_get, load_config
         config = load_config()
         return cfg_get(config, "plugins", "optmem", default={}) or {}
     except Exception:
         return {}
+
+
+def _get_hermes_home() -> str:
+    """Return HERMES_HOME, using the Hermes helper when available else env/default."""
+    try:
+        from hermes_constants import get_hermes_home
+        return str(get_hermes_home())
+    except Exception:
+        import os
+        return os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+
+
+def _display_hermes_home() -> str:
+    try:
+        from hermes_constants import display_hermes_home
+        return str(display_hermes_home())
+    except Exception:
+        return _get_hermes_home()
 
 
 # ---------------------------------------------------------------------------
@@ -226,8 +269,7 @@ class OptMemProvider(MemoryProvider):
         return True
 
     def get_config_schema(self):
-        from hermes_constants import display_hermes_home
-        default_dir = f"{display_hermes_home()}/optmem_memory"
+        default_dir = f"{_display_hermes_home()}/optmem_memory"
         return [
             {
                 "key": "memory_dir",
@@ -266,10 +308,9 @@ class OptMemProvider(MemoryProvider):
             raise
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        from hermes_constants import get_hermes_home
         # Honor hermes_home from kwargs when provided (profile-scoped storage),
-        # else fall back to the global helper.
-        home = str(kwargs.get("hermes_home") or get_hermes_home())
+        # else fall back to the global helper (or env/default in CI).
+        home = str(kwargs.get("hermes_home") or _get_hermes_home())
         mem_dir = self._config.get("memory_dir", f"{home}/optmem_memory")
         if isinstance(mem_dir, str):
             mem_dir = mem_dir.replace("$HERMES_HOME", home).replace("${HERMES_HOME}", home)
@@ -535,9 +576,20 @@ class OptMemProvider(MemoryProvider):
 
     def _handle_init(self, args: dict) -> str:
         try:
-            fresh = self._engine.init_store()
+            # Resolve the memory dir (mirror initialize) so init works even
+            # before the provider has been wired into a session.
+            home = _get_hermes_home()
+            mem_dir = self._config.get("memory_dir", f"{home}/optmem_memory")
+            if isinstance(mem_dir, str):
+                mem_dir = mem_dir.replace("$HERMES_HOME", home).replace("${HERMES_HOME}", home)
+            import os
+            fresh = not os.path.exists(os.path.join(mem_dir, "LOG.txt"))
+            eng = self._engine or OptMemEngine(mem_dir)
+            eng.init_store()
+            self._memory_dir = mem_dir
+            self._engine = eng
             return _json({"status": "initialized", "fresh": fresh,
-                          "memory_dir": self._memory_dir})
+                          "memory_dir": mem_dir})
         except Exception as exc:
             return tool_error(str(exc))
 

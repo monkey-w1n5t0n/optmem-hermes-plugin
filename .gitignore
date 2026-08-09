@@ -6,3 +6,6 @@ dist/
 .pytest_cache/
 optmem_memory/
 *.log
+.ci_venv/
+.venv/
+venv/

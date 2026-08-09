@@ -571,7 +571,9 @@ class OptMemEngine:
         """Create the store deliberately (mirrors memo init). Returns True if fresh."""
         from pathlib import Path
         d = Path(self.dir)
-        fresh = not d.is_dir()
+        # Fresh means the store (LOG.txt) did not already exist. The TREE/
+        # subdir is created eagerly by __init__, so don't key off is_dir().
+        fresh = not (d / "LOG.txt").exists()
         (d / "TREE").mkdir(parents=True, exist_ok=True)
         open(os.path.join(d, "LOG.txt"), "a").close()
         if not (d / "config").exists():
