@@ -1,0 +1,87 @@
+name: Bug Report
+description: File a bug report
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+  - type: input
+    id: hermes-version
+    attributes:
+      label: Hermes Agent Version
+      description: What version of Hermes Agent are you using? (run `hermes --version`)
+      placeholder: "0.20.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Windows 10/11
+        - Linux (specify distro in description)
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Go to '...'
+        2. Click on '....'
+        3. Scroll down to '....'
+        4. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? Include error messages, logs, etc.
+    validations:
+      required: true
+  - type: textarea
+    id: store-state
+    attributes:
+      label: Store State (if memory-related)
+      description: |
+        If this is a memory/storage issue, please include relevant info:
+        - `LOG.txt` head/tail (first/last 5 lines)
+        - `.lock` file existence/size
+        - `TREE/` directory listing
+        - Output of `optmem_wake` and `optmem_recall`
+      placeholder: |
+        LOG.txt (head):
+        #0 2026-08-09 first memory
+        ...
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: I have searched existing issues to avoid duplicates
+          required: true
+        - label: I am using the latest version of the plugin
+          required: true

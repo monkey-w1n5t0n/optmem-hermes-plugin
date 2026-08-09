@@ -1,0 +1,58 @@
+name: Feature Request
+description: Suggest an idea for this plugin
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature! Please keep in mind the OptMem philosophy:
+        - **Local-first** — no network calls, no external dependencies
+        - **Byte-compatible with upstream** — never break `LOG.txt`/`TREE/` format
+        - **Append-only, 280 bytes/entry** — matches original `memo` CLI
+        - **Decay compression** — "nap, don't sleep"
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / Use Case
+      description: What problem does this solve? What's the use case?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: How would you like this to work? Include API/CLI changes if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What other approaches did you consider?
+    validations:
+      required: false
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - Engine (storage format, compression, search)
+        - Provider (Hermes integration, tools, hooks)
+        - CLI compatibility (memo CLI parity)
+        - Windows/Unix portability
+        - Documentation / DX
+        - Testing / CI
+    validations:
+      required: true
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checklist
+      options:
+        - label: This aligns with OptMem philosophy (local-first, byte-compatible, append-only)
+          required: true
+        - label: I've checked existing issues and discussions
+          required: true
+        - label: I'm willing to help implement or test this
+          required: false

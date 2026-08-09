@@ -1,0 +1,23 @@
+# Dependabot configuration for automated dependency updates
+# Updates dev dependencies (pytest, ruff) weekly
+
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "dev"
+    commit-message:
+      prefix: "chore(deps)"
+    ignore:
+      # Ignore major version updates that might break things
+      - dependency-name: "ruff"
+        update-type: "version-update:semver-major"
+      - dependency-name: "pytest"
+        update-type: "version-update:semver-major"
