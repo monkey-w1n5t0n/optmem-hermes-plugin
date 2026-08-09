@@ -1,0 +1,21 @@
+# Example Hermes config.yaml for OptMem memory provider
+#
+# Copy this to ~/.hermes/config.yaml (or your profile's config.yaml)
+# and restart the gateway: `hermes gateway restart`
+
+# ... your existing providers (openai, anthropic, etc.) ...
+
+memory:
+  provider: optmem
+  enabled: true
+
+# Optional: custom store location (default: $HERMES_HOME/memory/optmem)
+# memory_dir: "C:/Users/you/MyOptMemStore"
+
+toolsets:
+  - hermes-cli
+  # add your other toolsets
+
+agent:
+  max_turns: 100
+  # your other agent settings

@@ -4,6 +4,8 @@
 [![Python](https://img.shields.io/badge/python-%3E%3D3.11-blue.svg)](pyproject.toml)
 [![Hermes](https://img.shields.io/badge/Hermes%20Agent-memory%20provider-8A2BE2.svg)](https://github.com/NousResearch/hermes-agent)
 [![Parity](https://img.shields.io/badge/byte--compatible%20with%20memo%20CLI-✅-green.svg)](https://github.com/VictorTaelin/OptMem)
+[![CI](https://github.com/rarf/optmem-hermes-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/rarf/optmem-hermes-plugin/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/github/v/tag/rarf/optmem-hermes-plugin?label=version)](https://github.com/rarf/optmem-hermes-plugin/releases)
 
 **Permanent, searchable agent memory that never leaves your machine, costs zero
 tokens to recall, and is byte-for-byte compatible with Victor Taelin's

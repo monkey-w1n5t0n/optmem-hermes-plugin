@@ -15,9 +15,18 @@ dependencies = [
     "pyyaml",  # already a Hermes dependency; listed for standalone installs
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.3",
+]
+
 [project.urls]
 Homepage = "https://github.com/rarf/optmem-hermes-plugin"
 Repository = "https://github.com/rarf/optmem-hermes-plugin"
+Issues = "https://github.com/rarf/optmem-hermes-plugin/issues"
+Changelog = "https://github.com/rarf/optmem-hermes-plugin/blob/main/CHANGELOG.md"
 
 # Hermes discovers standalone memory plugins via directory scan
 # ($HERMES_HOME/plugins/<name>/) and via this entry point group.
@@ -26,3 +35,9 @@ optmem = "optmem"
 
 [tool.setuptools]
 py-modules = ["optmem"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+lint.select = ["E", "F", "I", "UP", "B", "C4", "SIM", "T20"]
+lint.ignore = ["S101"]  # assert used in tests
