@@ -9,6 +9,9 @@ on:
 
 jobs:
   build-and-release:
+    # Guard: only run for real tag pushes (avoids empty "failure" runs on
+    # plain `git push origin main`, which GitHub still records as a run).
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
