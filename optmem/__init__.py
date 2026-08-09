@@ -76,18 +76,20 @@ NOTE_SCHEMA = {
 RECALL_SCHEMA = {
     "name": "optmem_recall",
     "description": (
-        "Search the entire OptMem history with accent-normalized BM25 "
-        "(e.g. 'caçula' matches 'cacula'). Returns ranked memory lines. "
-        "Use when you need an old fact, decision, or event."
+        "Search the entire OptMem history. Default mode is case-insensitive "
+        "regex over every memory line, returned newest-first (matches the "
+        "original OptMem `memo recall`). Set bm25=true for optional fuzzy "
+        "accent-normalized search (e.g. 'caçula' matches 'cacula'). Use when "
+        "you need an old fact, decision, or event."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search query."},
+            "query": {"type": "string", "description": "Search query (regex by default)."},
             "topk": {"type": "integer", "description": "Max results (default 5)."},
-            "regex": {
+            "bm25": {
                 "type": "boolean",
-                "description": "Use literal regex instead of BM25 (default false).",
+                "description": "Use fuzzy accent-normalized BM25 instead of regex (default false).",
             },
         },
         "required": ["query"],
@@ -123,6 +125,83 @@ WAKE_SCHEMA = {
     "parameters": {"type": "object", "properties": {}},
 }
 
+ZOOM_SCHEMA = {
+    "name": "optmem_zoom",
+    "description": (
+        "Open a decay-tree node (block lo-hi, e.g. 0-15) into its two halves, "
+        "down to the raw memories. Use to recover detail compressed away by a "
+        "nap. hi is exclusive."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "lo": {"type": "integer", "description": "Block start id (inclusive)."},
+            "hi": {"type": "integer", "description": "Block end id (EXCLUSIVE)."},
+        },
+        "required": ["lo", "hi"],
+    },
+}
+
+FORGET_SCHEMA = {
+    "name": "optmem_forget",
+    "description": (
+        "Drop a bad summary at block lo-hi so the next nap rebuilds it. "
+        "hi is exclusive."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "lo": {"type": "integer", "description": "Block start id (inclusive)."},
+            "hi": {"type": "integer", "description": "Block end id (EXCLUSIVE)."},
+        },
+        "required": ["lo", "hi"],
+    },
+}
+
+CONFIG_SCHEMA = {
+    "name": "optmem_config",
+    "description": (
+        "Show or change OptMem size knobs for this store (mirrors `memo config`). "
+        "Pass NAME=VALUE pairs to change (e.g. ENTRY_CHARS=280), or no args to "
+        "show current values. Allowed: WAKE_LINES, ENTRY_CHARS, RAW_MAX, "
+        "PART_CHARS, PART_LINES."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "changes": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional NAME=VALUE pairs to apply.",
+            },
+        },
+    },
+}
+
+IMPORT_SCHEMA = {
+    "name": "optmem_import",
+    "description": (
+        "Bulk-load historical memories from a file of 'YYYY-MM-DD <text>' lines "
+        "(one identity bootstrap, used once). Mirrors `memo import`."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "file": {"type": "string", "description": "Path to the import file."},
+        },
+        "required": ["file"],
+    },
+}
+
+INIT_SCHEMA = {
+    "name": "optmem_init",
+    "description": (
+        "Create this OptMem store deliberately (LOG.txt + TREE/ + config). "
+        "Mirrors `memo init`. Safe to re-run; never overwrites existing data."
+    ),
+    "parameters": {"type": "object", "properties": {}},
+}
+
 
 class OptMemProvider(MemoryProvider):
     """Hermes MemoryProvider backed by the OptMem append-only engine."""
@@ -152,84 +231,93 @@ class OptMemProvider(MemoryProvider):
         ]
 
     def save_config(self, values, hermes_home):
+        import os as _os
+        import tempfile as _tf
         from pathlib import Path
         config_path = Path(hermes_home) / "config.yaml"
+        import yaml
+        existing = {}
+        if config_path.exists():
+            with open(config_path, encoding="utf-8-sig") as f:
+                existing = yaml.safe_load(f) or {}
+        existing.setdefault("plugins", {})
+        existing["plugins"]["optmem"] = values
+        # Atomic write: temp + os.replace, so a crash mid-write cannot destroy
+        # the user's config.yaml. Re-raise on failure (do NOT silently swallow).
+        fd, tmp = _tf.mkstemp(dir=str(config_path.parent), suffix=".tmp")
         try:
-            import yaml
-            existing = {}
-            if config_path.exists():
-                with open(config_path, encoding="utf-8-sig") as f:
-                    existing = yaml.safe_load(f) or {}
-            existing.setdefault("plugins", {})
-            existing["plugins"]["optmem"] = values
-            with open(config_path, "w", encoding="utf-8") as f:
+            with _os.fdopen(fd, "w", encoding="utf-8") as f:
                 yaml.dump(existing, f, default_flow_style=False)
-        except Exception as e:
-            logger.warning("OptMem save_config failed: %s", e)
+                f.flush()
+                _os.fsync(f.fileno())
+            _os.replace(tmp, config_path)
+        except Exception:
+            try:
+                _os.unlink(tmp)
+            except Exception:
+                pass
+            raise
 
     def initialize(self, session_id: str, **kwargs) -> None:
         from hermes_constants import get_hermes_home
-        home = str(get_hermes_home())
+        # Honor hermes_home from kwargs when provided (profile-scoped storage),
+        # else fall back to the global helper.
+        home = str(kwargs.get("hermes_home") or get_hermes_home())
         mem_dir = self._config.get("memory_dir", f"{home}/optmem_memory")
         if isinstance(mem_dir, str):
             mem_dir = mem_dir.replace("$HERMES_HOME", home).replace("${HERMES_HOME}", home)
         self._memory_dir = mem_dir
         self._engine = OptMemEngine(mem_dir)
         self._session_id = session_id
+        self._woke_session = False  # option B: wake only on the first turn
 
     # -- context ------------------------------------------------------------
 
     def system_prompt_block(self) -> str:
-        if self._engine is None:
-            return ""
-        n = self._engine.log_len()
-        if n == 0:
-            return (
-                "# OptMem (permanent memory)\n"
-                "Active and empty. Use optmem_note to store durable facts about "
-                "the family, decisions, and events of lasting effect. They are "
-                "never deleted and decay (older ones compress) over time."
-            )
-        pending = len(self._engine.pending_naps())
-        msg = (
-            f"# OptMem (permanent memory)\n"
-            f"Active. {n} memories stored (append-only, decay-compressed). "
-            f"Use optmem_recall to search all history, optmem_note to add, "
-            f"optmem_wake to see the full context."
+        # STATIC: must not contain counters (log_len / pending_naps) so the
+        # cached system-prompt prefix is never invalidated. Instructions only.
+        return (
+            "# OptMem (permanent memory)\n"
+            "Active. Use optmem_wake at session start to load context.\n"
+            "Record durable facts with optmem_note: ONE line, max 280 bytes "
+            "(a single atomic fact — do NOT write long paragraphs; split "
+            "distinct facts into separate notes). If optmem_nap asks for a "
+            "compression, do it before your next action.\n"
+            "Search all history with optmem_recall; navigate the decay tree "
+            "with optmem_zoom. Never edit or delete the memory files directly."
         )
-        if pending:
-            msg += f"\n{pending} compression(s) pending — do them via optmem_nap when asked."
-        return msg
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if self._engine is None:
             return ""
         try:
             lines = []
-            # Always surface the decayed context. This lets OptMem fully replace
-            # the builtin short-term memory when memory_enabled is False — the
-            # agent still sees the permanent context every turn via prefetch
-            # (dynamic context, does NOT break the cached system prompt).
-            wake = self._engine.wake_lines()
-            if wake:
-                lines.append("## OptMem context (permanent, decay-compressed)\n" + "\n".join(wake))
-            # Pending nap first so the agent acts before context grows.
+            # OPTION B (matches original `memo wake` semantics): the full decay
+            # context is surfaced ONLY on the first turn of the session, not
+            # every turn. Subsequent turns get just the query recall — this
+            # keeps token cost low and mirrors the official "wake once" rule.
+            if not self._woke_session:
+                wake = self._engine.wake_lines()
+                if wake:
+                    lines.append("## OptMem context (permanent, decay-compressed)\n" + "\n".join(wake))
+                self._woke_session = True
+            # Pending nap is always shown (mandatory pressure, like the CLI).
             nap = self._engine.next_nap()
             if nap:
                 (lo, hi), prompt = nap
                 lines.append(
-                    f"[OptMem] Compression due for #{lo}-{hi}. Run:\n"
-                    f"optmem_nap(lo={lo}, hi={hi}, summary=\\\"<one line>\\\")\\n"
-                    f"{prompt}"
+                    "[OptMem] Compression due for #%d-%d. Run optmem_nap with a "
+                    "one-line summary (max 280 bytes):\n%s" % (lo, hi - 1, prompt)
                 )
+            # Query-scoped recall only (no wake re-injection on later turns).
             if query:
-                results = self._engine.recall(query, topk=5)
+                results = self._engine.recall(query, topk=5, mode="regex")
                 if results:
                     body = "\n".join(
-                        f"- [{score:.2f}] #{mid} {date} {text}"
+                        f"- #{mid} {date} {text}"
                         for score, mid, date, text in results
                     )
-                    lines.append("## OptMem recall\n" + body)
+                    lines.append("## OptMem recall (regex)\n" + body)
             return "\n\n".join(lines)
         except Exception as e:
             logger.debug("OptMem prefetch failed: %s", e)
@@ -242,17 +330,31 @@ class OptMemProvider(MemoryProvider):
         pass
 
     def on_memory_write(self, action: str, target: str, content: str, metadata=None) -> None:
-        """Mirror builtin memory writes into the permanent OptMem log."""
-        if action == "add" and self._engine is not None and content:
-            try:
-                self._engine.append(content)
-            except Exception as e:
-                logger.debug("OptMem mirror failed: %s", e)
+        """Mirror builtin memory writes into the permanent OptMem log.
+
+        Only mirrors PRIMARY-context writes (the agent's own working session),
+        never cron or subagent writes — the official OptMem rule is that a
+        subagent must never run memo, because it cannot judge what is already
+        known and would duplicate/garble memories. Long content is NOT
+        auto-split; if it exceeds 280 bytes engine.append raises and the
+        agent is expected to store smaller, atomic facts (matches memo).
+        """
+        if action != "add" or self._engine is None or not content:
+            return
+        ctx = metadata or {}
+        origin = str(ctx.get("execution_context") or ctx.get("write_origin") or "")
+        if origin in ("cron", "subagent", "delegate", "background"):
+            return
+        try:
+            self._engine.append(content.strip())
+        except Exception as e:
+            logger.warning("OptMem mirror rejected (>280B or invalid): %s", e)
 
     # -- tools --------------------------------------------------------------
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [NOTE_SCHEMA, RECALL_SCHEMA, NAP_SCHEMA, WAKE_SCHEMA]
+        return [NOTE_SCHEMA, RECALL_SCHEMA, NAP_SCHEMA, WAKE_SCHEMA, ZOOM_SCHEMA,
+                FORGET_SCHEMA, CONFIG_SCHEMA, IMPORT_SCHEMA, INIT_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name == "optmem_note":
@@ -263,12 +365,24 @@ class OptMemProvider(MemoryProvider):
             return self._handle_nap(args)
         if tool_name == "optmem_wake":
             return self._handle_wake(args)
+        if tool_name == "optmem_zoom":
+            return self._handle_zoom(args)
+        if tool_name == "optmem_forget":
+            return self._handle_forget(args)
+        if tool_name == "optmem_config":
+            return self._handle_config(args)
+        if tool_name == "optmem_import":
+            return self._handle_import(args)
+        if tool_name == "optmem_init":
+            return self._handle_init(args)
         return tool_error(f"Unknown tool: {tool_name}")
 
     def _handle_note(self, args: dict) -> str:
         try:
             text = args["text"].strip()
-            mid = self._engine.append(text)
+            if not text:
+                return tool_error("empty memory")
+            mid = self._engine.append(text)  # raises ValueError if >280B
             out = {"saved_as": f"#{mid}", "status": "added"}
             nap = self._engine.next_nap()
             if nap:
@@ -285,8 +399,10 @@ class OptMemProvider(MemoryProvider):
         try:
             query = args["query"]
             topk = int(args.get("topk", 5))
-            regex = bool(args.get("regex", False))
-            hits = self._engine.recall(query, topk=topk, regex=regex)
+            # Default behavior matches the original `memo recall` (regex).
+            # Set mode="bm25" for the optional fuzzy accent-normalized search.
+            mode = "bm25" if bool(args.get("bm25", False)) else "regex"
+            hits = self._engine.recall(query, topk=topk, mode=mode)
             if not hits:
                 return _json({"results": [], "count": 0})
             results = [
@@ -322,6 +438,117 @@ class OptMemProvider(MemoryProvider):
         except Exception as exc:
             return tool_error(str(exc))
 
+    def _validate_block(self, lo: int, hi: int) -> Optional[str]:
+        """Return an error string if (lo,hi) is not a valid aligned power-of-two
+        block id (mirrors memo's block_id check). hi is EXCLUSIVE."""
+        n = hi - lo
+        if n < 2 or (n & (n - 1)) or (lo % n):
+            return f"{lo}-{hi-1} is not a block. Copy the id printed by optmem_wake, like 16-31."
+        return None
+
+    def _handle_zoom(self, args: dict) -> str:
+        try:
+            lo = int(args["lo"])
+            hi = int(args["hi"])
+            err = self._validate_block(lo, hi)
+            if err:
+                return tool_error(err)
+            size = hi - lo
+            if size <= RAW_MAX:
+                body = self._engine._log_slice(lo, hi)
+                out = ["#%d %s %s" % e for e in body]
+            else:
+                mid = (lo + hi) // 2
+                out = []
+                for a, b in ((lo, mid), (mid, hi)):
+                    s = self._engine._tree_get(a, b)
+                    if s is None:
+                        s = "(missing - rebuild via optmem_nap)"
+                    out.append("#%d-%d %s" % (a, b - 1, s))
+            return _json({"block": f"{lo}-{hi-1}", "halves": out})
+        except (KeyError, ValueError) as exc:
+            return tool_error(str(exc))
+        except Exception as exc:
+            return tool_error(str(exc))
+
+    def _handle_forget(self, args: dict) -> str:
+        try:
+            lo = int(args["lo"])
+            hi = int(args["hi"])
+            err = self._validate_block(lo, hi)
+            if err:
+                return tool_error(err)
+            before = self._engine.log_len()
+            self._engine.forget(lo, hi)
+            return _json({"status": "forgotten", "block": f"{lo}-{hi-1}"})
+        except (KeyError, ValueError) as exc:
+            return tool_error(str(exc))
+        except Exception as exc:
+            return tool_error(str(exc))
+
+    def _handle_config(self, args: dict) -> str:
+        try:
+            changes = args.get("changes") or []
+            over = self._engine.read_config()
+            for c in changes:
+                k, eq, v = str(c).partition("=")
+                k = k.strip().upper()
+                if not eq or k not in self._engine.KNOBS:
+                    return tool_error(
+                        "invalid knob %r; allowed: %s" % (c, ", ".join(self._engine.KNOBS)))
+                over[k] = int(v.strip())
+            if changes:
+                self._engine.write_config(over)
+            rows = []
+            for k, (default, what) in self._engine.KNOBS.items():
+                cur = over.get(k, default)
+                rows.append({"name": k, "value": cur, "default": default, "what": what})
+            return _json({"config": rows, "changed": bool(changes)})
+        except (KeyError, ValueError) as exc:
+            return tool_error(str(exc))
+        except Exception as exc:
+            return tool_error(str(exc))
+
+    def _handle_import(self, args: dict) -> str:
+        try:
+            path = args["file"]
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()
+            added = self._engine.import_lines(lines)
+            return _json({"status": "imported", "count": added})
+        except (KeyError, ValueError, FileNotFoundError, UnicodeDecodeError) as exc:
+            return tool_error(str(exc))
+        except Exception as exc:
+            return tool_error(str(exc))
+
+    def _handle_init(self, args: dict) -> str:
+        try:
+            fresh = self._engine.init_store()
+            return _json({"status": "initialized", "fresh": fresh,
+                          "memory_dir": self._memory_dir})
+        except Exception as exc:
+            return tool_error(str(exc))
+
+    def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        """Background decay-tree maintenance: drain pending naps incrementally
+        using the host LLM (ctx.llm), so the tree never falls behind (no manual
+        cron needed). Only runs every ~10 turns to bound LLM cost, and never
+        touches the prompt cache (writes to disk only)."""
+        if self._engine is None or not hasattr(self, "_ctx") or self._ctx is None:
+            return
+        if turn_number % 10 != 0:
+            return
+        try:
+            nap = self._engine.next_nap()
+            if not nap:
+                return
+            (lo, hi), prompt = nap
+            summary = self._ctx.llm.complete(prompt, max_tokens=120).strip()
+            if summary:
+                self._engine.apply_nap(lo, hi, summary)
+        except Exception as e:
+            logger.warning("OptMem auto-nap skipped: %s", e)
+
     def shutdown(self) -> None:
         self._engine = None
 
@@ -339,4 +566,5 @@ def register(ctx) -> None:
     """Register the OptMem memory provider with Hermes."""
     config = _load_plugin_config()
     provider = OptMemProvider(config=config)
+    provider._ctx = ctx  # give on_turn_start access to ctx.llm for auto-nap
     ctx.register_memory_provider(provider)

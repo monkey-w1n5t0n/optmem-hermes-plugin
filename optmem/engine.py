@@ -36,7 +36,7 @@ TREE_REC = 288
 RAW_MAX = 16
 
 # Sizes (mirror memo defaults).
-WAKE_LINES = 208          # ~16k tokens of context printed by wake
+WAKE_LINES = 96           # ~8k tokens of context printed by wake (memo default)
 ENTRY_CHARS = 280         # longest one memory line, in bytes
 
 
@@ -49,7 +49,7 @@ def _make_lock(path: str):
 
     Uses msvcrt on Windows, fcntl on Unix. No-op if neither is importable.
     """
-    lockf = open(path + ".lock", "a")
+    lockf = open(os.path.join(os.path.dirname(path) or ".", ".lock"), "a")
     if sys.platform == "win32":
         try:
             import msvcrt
@@ -99,7 +99,13 @@ class _Flock:
         self._acquire()
         return self
     def __exit__(self, *exc):
-        self._release()
+        try:
+            self._release()
+        finally:
+            try:
+                self._f.close()
+            except Exception:
+                pass
         return False
 
 
@@ -109,6 +115,10 @@ class _NullLock:
     def __enter__(self):
         return self
     def __exit__(self, *exc):
+        try:
+            self._f.close()
+        except Exception:
+            pass
         return False
 
 
@@ -327,7 +337,10 @@ class OptMemEngine:
                 out.append("#%d %s %s" % (mid, date, text))
             else:
                 s = self._tree_get(lo, hi)
-                out.append("#%d-%d %s" % (lo, hi - 1, s or ""))
+                if s is None:
+                    out.append("#%d-%d (needs compression: run optmem_nap)" % (lo, hi - 1))
+                else:
+                    out.append("#%d-%d %s" % (lo, hi - 1, s))
         return out
 
     # -- naps (compression) -------------------------------------------------
@@ -365,7 +378,7 @@ class OptMemEngine:
         tail = "" if left <= 0 else (
             "\n%d compressions remain" % left)
         return (
-            "Compress memories #%d-%d into one line of at most %d characters.\n"
+            "Compress memories #%d-%d into one line of at most %d bytes.\n"
             "Keep what has lasting effect, drop what does not. Invent nothing.\n\n"
             "%s%s\n"
             % (lo, hi - 1, ENTRY_CHARS, body, tail)
@@ -383,8 +396,8 @@ class OptMemEngine:
         summary = summary.strip()
         if not summary:
             raise ValueError("empty summary")
-        if len(summary.encode("utf-8")) > TREE_REC - 1:
-            raise ValueError("summary too long")
+        if len(summary.encode("utf-8")) > ENTRY_CHARS:
+            raise ValueError("summary too long: max %d bytes" % ENTRY_CHARS)
         return self._tree_put(lo, hi, summary)
 
     def forget(self, lo: int, hi: int) -> None:
@@ -440,23 +453,41 @@ class OptMemEngine:
             return True
         return self.log_len() != getattr(self, "_index_len", -1)
 
-    def recall(self, query: str, topk: int = 5, regex: bool = False,
+    def recall(self, query: str, topk: int = 5, mode: str = "regex",
                use_index: bool = True) -> List[Tuple[float, int, str, str]]:
-        """Ranked recall. Accent-normalized BM25 by default; regex if requested.
-
-        With ``use_index`` (default), builds/caches the BM25 index and rebuilds
-        it lazily only when the log has grown since the last build — so new
-        notes become searchable without re-tokenizing every record each call.
+        """Recall. Default mode "regex" matches the official OptMem `memo recall`
+        behavior exactly: case-insensitive regex over "#id date text", newest
+        matches first, capped by output size. "bm25" is an optional extra
+        (accent-normalized BM25) kept for fuzzy search; it does not change the
+        default behavior so the plugin stays byte- and behavior-compatible with
+        the original CLI on the same store.
         """
         if not self.log_len():
             return []
-        if regex:
-            if use_index and self._index_stale():
-                self.build_index()
-            docs = self._index_docs if getattr(self, "_index_docs", None) is not None else self._all_records()
-            pat = re.compile(query, re.I)
-            hits = [(1.0, mid, date, text) for mid, date, text, _ in docs if pat.search(text)]
-            return hits[:topk]
+        if mode == "bm25":
+            return self._recall_bm25(query, topk, use_index)
+        # mode == "regex" (default) — mirror memo cmd_recall exactly:
+        # case-insensitive regex over "#id date text"; keep the NEWEST matches
+        # that fit within PART_CHARS, returning newest-first.
+        pat = re.compile(query, re.I)
+        PART_CHARS = 5000
+        hits, out, size = 0, [], 0
+        for e in self._all_records():
+            line = "#%d %s %s" % (e[0], e[1], e[2])
+            if not pat.search(line):
+                continue
+            hits += 1
+            out.append((1.0, e[0], e[1], e[2]))
+            size += len(line.encode()) + 1
+            while size > PART_CHARS:
+                old = out.pop(0)
+                size -= len("#%d %s %s" % (old[1], old[2], old[3]).encode()) + 1
+        out.reverse()  # newest-first, matching memo's "Newest N of M" output
+        return out[:topk] if topk else out
+
+    def _recall_bm25(self, query: str, topk: int = 5,
+                     use_index: bool = True) -> List[Tuple[float, int, str, str]]:
+        """Accent-normalized BM25 (optional, non-default)."""
         if use_index and self._index_stale():
             self.build_index()
         docs = self._index_docs if use_index else self._all_records()
@@ -487,11 +518,103 @@ class OptMemEngine:
                 if term not in idf:
                     continue
                 f = tf.get(term, 0)
-                if f == 0:
-                    continue
-                denom = f + k1 * (1 - b + b * dl / avgdl)
-                score += idf[term] * (f * (k1 + 1)) / denom
+                score += idf[term] * (f * (k1 + 1)) / (f + k1 * (1 - b + b * dl / avgdl))
             if score > 0:
                 scored.append((score, mid, date, text))
         scored.sort(reverse=True)
         return scored[:topk]
+
+    # -- config / init / import (mirror memo config | init | import) --------
+
+    KNOBS = {
+        "WAKE_LINES": (96, "memories printed by wake"),
+        "ENTRY_CHARS": (280, "longest one memory line, in bytes"),
+        "RAW_MAX": (16, "blocks up to this many memories compress raw"),
+        "PART_CHARS": (20000, "output paging: largest part, in bytes"),
+        "PART_LINES": (500, "output paging: largest part, in lines"),
+    }
+
+    def read_config(self) -> Dict[str, int]:
+        """Read the per-store `config` file (mirrors memo's `config`)."""
+        path = os.path.join(self.dir, "config")
+        over = {}
+        if os.path.exists(path):
+            for line in open(path, encoding="utf-8"):
+                line = line.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                k, eq, v = line.partition("=")
+                if eq and k.strip() in self.KNOBS:
+                    try:
+                        over[k.strip()] = int(v.strip())
+                    except ValueError:
+                        pass
+        return over
+
+    def write_config(self, over: Dict[str, int]) -> None:
+        """Write the per-store `config` file (mirrors memo's write_config)."""
+        path = os.path.join(self.dir, "config")
+        out = ["# OptMem sizes for this memory. A commented line means: follow the",
+               "# tool's default. Edit with `optmem_config NAME=VALUE`.", ""]
+        for k, (default, what) in self.KNOBS.items():
+            out.append("%-2s%-12s = %-6d # %s"
+                       % ("" if k in over else "# ", k, over.get(k, default), what))
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(out) + "\n")
+        os.replace(tmp, path)
+
+    def init_store(self) -> bool:
+        """Create the store deliberately (mirrors memo init). Returns True if fresh."""
+        from pathlib import Path
+        d = Path(self.dir)
+        fresh = not d.is_dir()
+        (d / "TREE").mkdir(parents=True, exist_ok=True)
+        open(os.path.join(d, "LOG.txt"), "a").close()
+        if not (d / "config").exists():
+            self.write_config({})
+        return fresh
+
+    def import_lines(self, lines: List[str]) -> int:
+        """Bulk-append historical 'YYYY-MM-DD <text>' memories (mirrors memo import).
+        Used once for bootstrapping an identity. Returns count appended."""
+        import datetime
+        recs = self._all_records()
+        last = recs[-1][1] if recs else "0000-00-00"
+        parsed = []  # validate everything first, then write (atomic-ish)
+        for i, raw in enumerate(lines, 1):
+            line = raw.rstrip("\n")
+            if not line.strip():
+                continue
+            date, _, text = line.partition(" ")
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+                raise ValueError("line %d: expected 'YYYY-MM-DD <text>', got: %s" % (i, line))
+            try:
+                datetime.datetime.strptime(date, "%Y-%m-%d")
+            except ValueError:
+                raise ValueError("line %d: %s is not a real date." % (i, date))
+            if date < last:
+                raise ValueError("line %d: date %s precedes previous (%s)." % (i, date, last))
+            text = text.strip()
+            if not text or len(text.encode("utf-8")) > ENTRY_CHARS:
+                raise ValueError("line %d: %d bytes, limit %d." % (i, len(text.encode("utf-8")), ENTRY_CHARS))
+            parsed.append((date, text))
+            last = date
+        for date, text in parsed:
+            self._append_raw(date, text)
+        return len(parsed)
+
+    def _append_raw(self, date: str, text: str) -> int:
+        """Append a memory with an explicit date (used by import)."""
+        with self._lock():
+            mid = self.log_len()
+            rec = ("#%d %s %s" % (mid, date, text)).encode("utf-8")
+            if len(rec) > LOG_REC - 1:
+                raise ValueError("entry too long: %d bytes" % len(rec))
+            with open(os.path.join(self.dir, "LOG.txt"), "r+b") as f:
+                f.seek(mid * LOG_REC)
+                f.write(rec)
+                f.write(b" " * (LOG_REC - len(rec) - 1))
+                f.write(b"\n")
+            self._index_len = -1
+            return mid

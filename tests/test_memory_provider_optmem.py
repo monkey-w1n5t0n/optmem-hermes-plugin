@@ -42,7 +42,8 @@ class TestOptMemEngine:
         eng.append("a caçula chegou cedo")          # id 0
         eng.append("o cachorro late de noite")      # id 1
         eng.append("comprei cacau para a receita")  # id 2
-        hits = eng.recall("cacula", topk=3)
+        # BM25 is opt-in via mode="bm25" (accent-normalized).
+        hits = eng.recall("cacula", topk=3, mode="bm25")
         assert hits, "expected at least one BM25 hit"
         ids = [mid for _, mid, _, _ in hits]
         # 'caçula' (id 0) must match a query for 'cacula' (no accent).
@@ -53,13 +54,14 @@ class TestOptMemEngine:
     def test_regex_recall_fallback(self, tmp_path):
         eng = OptMemEngine(str(tmp_path))
         eng.append("regex test: AllDrivers paywall pendente")
-        hits = eng.recall("AllDrivers.*paywall", topk=1, regex=True)
+        # Default recall mode mirrors `memo recall` exactly (regex, re.I).
+        hits = eng.recall("AllDrivers.*paywall", topk=1, mode="regex")
         assert hits and hits[0][1] == 0
 
     def test_index_rebuilds_after_append(self, tmp_path):
         eng = OptMemEngine(str(tmp_path))
         eng.append("seed memory for index staleness")
-        eng.recall("seed")  # builds index
+        eng.recall("seed", mode="bm25")  # builds BM25 index
         assert not eng._index_stale()
         eng.append("second memory changes length")
         assert eng._index_stale(), "index must be invalidated when log grows"
@@ -125,7 +127,7 @@ class TestOptMemProvider:
         p = _make_provider(tmp_path)
         out = json.loads(p.handle_tool_call("optmem_note", {"text": "deploy em staging autorizado"}))
         assert out["status"] == "added"
-        res = json.loads(p.handle_tool_call("optmem_recall", {"query": "deploy staging"}))
+        res = json.loads(p.handle_tool_call("optmem_recall", {"query": "staging"}))
         assert res["count"] >= 1
         assert any("deploy" in r["text"] for r in res["results"])
 
