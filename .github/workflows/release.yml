@@ -1,22 +1,23 @@
-# Release workflow - creates GitHub Release on tag push
+# Release workflow - builds and publishes a GitHub Release.
+#
+# Triggered by a published GitHub Release (create one from a pushed tag via
+# the GitHub UI/API, or let the CI tag job do it). Using `on: release` instead
+# of `on: push: tags` avoids the empty "failure" runs GitHub records when a
+# plain `git push origin main` doesn't carry a tag.
 
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  id-token: write
 
 jobs:
   build-and-release:
-    # Guard: only run for real tag pushes (avoids empty "failure" runs on
-    # plain `git push origin main`, which GitHub still records as a run).
-    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,7 +39,7 @@ jobs:
           ls -la dist/
           twine check dist/*
 
-      - name: Create GitHub Release
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
