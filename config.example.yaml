@@ -9,15 +9,29 @@ memory:
   provider: optmem
   enabled: true
 
-  # --- Optional OptMem-specific settings ---
-  # Auto-compaction: the plugin compresses old memory blocks every ~10 turns.
-  # Default: deterministic, LLM-free summary (zero token cost, works offline).
-  # Set llm_summary: true to let the host LLM write a more fluent summary
-  # when available (token cost per nap cycle). Equivalent to env OPTMEM_LLM_SUMMARY=1.
-  # llm_summary: true
+# The shared setup uses the canonical memo command. On blooper this is an SSH
+# shim to the VPS store; on the VPS it is the real memo executable. Do not set
+# memory_dir when using memo-cli: that would create a profile-local fork.
+plugins:
+  optmem:
+    backend: memo-cli
+    memo_command: ~/.optmem/memo
+    shared_store: true
+    memo_timeout: 30
 
-# Optional: custom store location (default: $HERMES_HOME/memory/optmem)
-# memory_dir: "C:/Users/you/MyOptMemStore"
+# For a standalone local store instead:
+# plugins:
+#   optmem:
+#     backend: local
+#     memory_dir: "$HERMES_HOME/optmem_memory"
+
+# --- Optional OptMem-specific settings ---
+# Auto-compaction: the plugin compresses old memory blocks every ~10 turns.
+# Default: deterministic, LLM-free summary (zero token cost, works offline).
+# Set llm_summary: true to let the host LLM write a more fluent summary.
+# plugins:
+#   optmem:
+#     llm_summary: true
 
 toolsets:
   - hermes-cli

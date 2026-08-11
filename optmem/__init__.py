@@ -60,6 +60,7 @@ except Exception:  # pragma: no cover
         import json
         return json.dumps({"error": message, **extra}, ensure_ascii=False)
 
+from .cli_backend import MemoCliBackend
 from .engine import ENTRY_CHARS, RAW_MAX, OptMemEngine
 
 logger = logging.getLogger(__name__)
@@ -257,7 +258,7 @@ class OptMemProvider(MemoryProvider):
 
     def __init__(self, config: dict | None = None):
         self._config = config or _load_plugin_config()
-        self._engine: OptMemEngine | None = None
+        self._engine: OptMemEngine | MemoCliBackend | None = None
         self._memory_dir: str | None = None
 
     @property
@@ -311,6 +312,21 @@ class OptMemProvider(MemoryProvider):
         # Honor hermes_home from kwargs when provided (profile-scoped storage),
         # else fall back to the global helper (or env/default in CI).
         home = str(kwargs.get("hermes_home") or _get_hermes_home())
+        backend = str(self._config.get("backend", "local")).lower()
+        if backend in {"memo-cli", "cli", "remote"}:
+            # Do not resolve/create memory_dir: on blooper the command is an
+            # SSH shim, and a local fallback would fork the canonical store.
+            self._engine = MemoCliBackend(
+                self._config.get("memo_command", "~/.optmem/memo"),
+                float(self._config.get("memo_timeout", 30)),
+            )
+            self._memory_dir = None
+            self._session_id = session_id
+            self._woke_session = False
+            self._backend_kind = "memo-cli"
+            return
+        if backend != "local":
+            raise ValueError(f"unknown OptMem backend: {backend}")
         mem_dir = self._config.get("memory_dir", f"{home}/optmem_memory")
         if isinstance(mem_dir, str):
             mem_dir = mem_dir.replace("$HERMES_HOME", home).replace("${HERMES_HOME}", home)
@@ -318,6 +334,7 @@ class OptMemProvider(MemoryProvider):
         self._engine = OptMemEngine(mem_dir)
         self._session_id = session_id
         self._woke_session = False  # option B: wake only on the first turn
+        self._backend_kind = "local"
 
     # -- context ------------------------------------------------------------
 
@@ -506,7 +523,9 @@ class OptMemProvider(MemoryProvider):
             if err:
                 return tool_error(err)
             size = hi - lo
-            if size <= RAW_MAX:
+            if isinstance(self._engine, MemoCliBackend):
+                out = self._engine.zoom_halves(lo, hi)
+            elif size <= RAW_MAX:
                 body = self._engine._log_slice(lo, hi)
                 out = [f"#{e[0]} {e[1]} {e[2]}" for e in body]
             else:
@@ -541,6 +560,24 @@ class OptMemProvider(MemoryProvider):
         try:
             changes = args.get("changes") or []
             over = self._engine.read_config()
+            if isinstance(self._engine, MemoCliBackend):
+                if changes:
+                    allowed = {"WAKE_LINES", "ENTRY_CHARS", "PART_CHARS", "PART_LINES"}
+                    for c in changes:
+                        key, eq, value = str(c).partition("=")
+                        if not eq or key.strip().upper() not in allowed:
+                            return tool_error(
+                                f"invalid knob {c!r}; allowed: {', '.join(sorted(allowed))}"
+                            )
+                    self._engine.write_config({
+                        str(c).partition("=")[0].strip().upper(): int(
+                            str(c).partition("=")[2].strip()
+                        )
+                        for c in changes
+                    })
+                    over = self._engine.read_config()
+                rows = [{"name": k, "value": v} for k, v in over.items()]
+                return _json({"config": rows, "changed": bool(changes)})
             for c in changes:
                 k, eq, v = str(c).partition("=")
                 k = k.strip().upper()
@@ -576,6 +613,11 @@ class OptMemProvider(MemoryProvider):
 
     def _handle_init(self, args: dict) -> str:
         try:
+            if isinstance(self._engine, MemoCliBackend):
+                return tool_error(
+                    "remote optmem_init is disabled; initialize the canonical "
+                    "store administratively"
+                )
             # Resolve the memory dir (mirror initialize) so init works even
             # before the provider has been wired into a session.
             home = _get_hermes_home()

@@ -98,6 +98,30 @@ hermes gateway restart
 
 That's it. The agent now has permanent memory — no migration, no prompt paste.
 
+### Shared OptMem store across blooper and the VPS
+
+If `~/.optmem/memo` is an SSH shim on the laptop, do **not** configure
+`memory_dir` there. The local engine would create a second sequential store.
+Use the canonical CLI backend instead, on both machines:
+
+```yaml
+memory:
+  provider: optmem
+
+plugins:
+  optmem:
+    backend: memo-cli
+    memo_command: ~/.optmem/memo
+    shared_store: true
+    memo_timeout: 30
+```
+
+The plugin invokes the existing CLI for reads and writes, so blooper's shim
+forwards them to the VPS's canonical `~/.optmem/memory`. Connectivity failures
+are fail-closed; the plugin never falls back to `$HERMES_HOME` storage. The
+local backend remains available for intentionally standalone stores with
+`backend: local` and `memory_dir: ...`.
+
 ---
 
 ## Tools exposed to the agent
