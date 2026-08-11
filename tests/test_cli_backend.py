@@ -11,8 +11,9 @@ args = sys.argv[1:]
 if args[:1] == ["note"]:
     print("Saved as #42.")
 elif args[:1] == ["wake"]:
-    print("#40-41 durable context")
-    print("Compress memories #42-43 into one line")
+    print("#40-41 durable context", file=sys.stderr)
+    print("Compress memories #42-43 into one line", file=sys.stderr)
+    raise SystemExit(2)
 elif args[:1] == ["recall"]:
     print("#42 2026-08-10 canonical remote fact")
 elif args[:1] == ["zoom"]:
@@ -58,6 +59,12 @@ def test_cli_backend_nap_uses_inclusive_cli_block(tmp_path):
         provider.handle_tool_call("optmem_nap", {"lo": 42, "hi": 43, "summary": "compressed"})
     )
     assert result["status"] == "compressed"
+
+
+def test_cli_backend_surfaces_pending_nap_when_wake_exits_nonzero(tmp_path):
+    provider = _provider(tmp_path)
+    ctx = provider.prefetch("")
+    assert "Compression due for #42-43" in ctx
 
 
 def test_cli_backend_does_not_fallback_to_local_store(tmp_path):

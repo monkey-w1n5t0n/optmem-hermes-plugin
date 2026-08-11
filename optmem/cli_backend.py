@@ -45,10 +45,16 @@ class MemoCliBackend:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise MemoCliError(f"canonical OptMem unavailable: {exc}") from exc
+        output = proc.stdout
         if proc.returncode:
             detail = (proc.stderr or proc.stdout).strip()
+            # The canonical CLI deliberately exits non-zero when wake is blocked
+            # by pending compressions. That is actionable state, not transport
+            # failure: callers must still be able to parse and service the nap.
+            if args == ("wake",) and _NAP.search(detail):
+                return detail
             raise MemoCliError(detail or f"memo exited with status {proc.returncode}")
-        return proc.stdout
+        return output
 
     @staticmethod
     def _memory_lines(output: str) -> list[tuple[int, str, str]]:
@@ -85,7 +91,9 @@ class MemoCliBackend:
         if not match:
             return None
         lo, hi_inclusive = int(match.group(1)), int(match.group(2))
-        return (lo, hi_inclusive + 1), output[match.end() :].splitlines()[0].strip()
+        tail = output[match.end() :].splitlines()
+        prompt = next((line.strip() for line in tail if line.strip()), "")
+        return (lo, hi_inclusive + 1), prompt
 
     def apply_nap(self, lo: int, hi: int, summary: str) -> bool:
         # The CLI's displayed block is inclusive; the provider API is exclusive.
