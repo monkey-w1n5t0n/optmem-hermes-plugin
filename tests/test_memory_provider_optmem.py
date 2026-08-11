@@ -143,9 +143,15 @@ class TestOptMemProvider:
         assert nap, "expected a pending compression after 2 notes"
         (lo, hi), _ = nap
         res = json.loads(
-            p.handle_tool_call("optmem_nap", {"lo": lo, "hi": hi, "summary": "ab resumido"})
+            p.handle_tool_call("optmem_nap", {"lo": lo, "hi": hi - 1, "summary": "ab resumido"})
         )
         assert res["status"] == "compressed"
+
+    def test_note_reports_inclusive_nap_end(self, tmp_path):
+        p = _make_provider(tmp_path)
+        p.handle_tool_call("optmem_note", {"text": "a"})
+        out = json.loads(p.handle_tool_call("optmem_note", {"text": "b"}))
+        assert out["nap_due"] == {"lo": 0, "hi": 1}
 
     def test_wake_tool(self, tmp_path):
         p = _make_provider(tmp_path)

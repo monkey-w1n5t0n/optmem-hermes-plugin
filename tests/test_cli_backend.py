@@ -55,7 +55,7 @@ def test_cli_backend_uses_command_without_creating_local_store(tmp_path):
 def test_cli_backend_nap_uses_inclusive_cli_block(tmp_path):
     provider = _provider(tmp_path)
     result = json.loads(
-        provider.handle_tool_call("optmem_nap", {"lo": 42, "hi": 44, "summary": "compressed"})
+        provider.handle_tool_call("optmem_nap", {"lo": 42, "hi": 43, "summary": "compressed"})
     )
     assert result["status"] == "compressed"
 

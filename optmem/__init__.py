@@ -452,11 +452,11 @@ class OptMemProvider(MemoryProvider):
             if not text:
                 return tool_error("empty memory")
             mid = self._engine.append(text)  # raises ValueError if >280B
-            out = {"saved_as": f"#{mid}", "status": "added"}
+            out: dict[str, Any] = {"saved_as": f"#{mid}", "status": "added"}
             nap = self._engine.next_nap()
             if nap:
-                (lo, hi), _ = nap
-                out["nap_due"] = {"lo": lo, "hi": hi}
+                (lo, hi_exclusive), _ = nap
+                out["nap_due"] = {"lo": lo, "hi": hi_exclusive - 1}
                 out["note"] = "Run optmem_nap for this block before your next action."
             return _json(out)
         except (KeyError, ValueError) as exc:
@@ -487,12 +487,16 @@ class OptMemProvider(MemoryProvider):
     def _handle_nap(self, args: dict) -> str:
         try:
             lo = int(args["lo"])
-            hi = int(args["hi"])
+            hi_inclusive = int(args["hi"])
+            if hi_inclusive < lo:
+                raise ValueError("hi must be greater than or equal to lo")
             summary = args["summary"].strip()
-            ok = self._engine.apply_nap(lo, hi, summary)
+            ok = self._engine.apply_nap(lo, hi_inclusive + 1, summary)
             if not ok:
-                return tool_error(f"#{lo}-{hi} was settled or forgotten meanwhile.")
-            return _json({"status": "compressed", "block": f"{lo}-{hi}"})
+                return tool_error(
+                    f"#{lo}-{hi_inclusive} was settled or forgotten meanwhile."
+                )
+            return _json({"status": "compressed", "block": f"{lo}-{hi_inclusive}"})
         except (KeyError, ValueError) as exc:
             return tool_error(str(exc))
         except Exception as exc:
